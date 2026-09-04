@@ -1,0 +1,46 @@
+{
+  "name": "orcode",
+  "version": "0.1.0",
+  "description": "Local peer messaging between Codex CLI and Claude Code CLI sessions",
+  "type": "module",
+  "bin": {
+    "orcode": "src/cli.ts"
+  },
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "integrations",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "node src/cli.ts",
+    "typecheck": "tsc",
+    "test": "node --test test/*.test.ts",
+    "check": "pnpm typecheck && pnpm test"
+  },
+  "keywords": [
+    "codex",
+    "claude-code",
+    "mcp",
+    "agents",
+    "cli"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "ws": "8.21.3",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "26.4.1",
+    "@types/ws": "8.18.1",
+    "typescript": "7.0.2"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "orcode",
+  "version": "0.1.0",
+  "description": "Local peer messaging between Codex CLI and Claude Code CLI sessions.",
+  "author": {
+    "name": "Orcode contributors"
+  },
+  "license": "MIT",
+  "keywords": ["codex", "claude-code", "mcp", "peer-messaging"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Orcode",
+    "shortDescription": "Message local Claude Code peers.",
+    "longDescription": "Discover live Claude Code sessions in the same project and explicitly send them peer messages through Orcode.",
+    "developerName": "Orcode contributors",
+    "category": "Productivity",
+    "capabilities": ["Interactive"],
+    "defaultPrompt": "List the available Orcode peers before sending a message."
+  },
+  "mcpServers": "./.mcp.json"
+}

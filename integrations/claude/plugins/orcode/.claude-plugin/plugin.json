@@ -1,0 +1,10 @@
+{
+  "name": "orcode",
+  "version": "0.1.0",
+  "description": "Local peer messaging between Claude Code CLI and Codex CLI sessions.",
+  "author": {
+    "name": "Orcode contributors"
+  },
+  "license": "MIT",
+  "keywords": ["claude-code", "codex", "mcp", "peer-messaging"]
+}

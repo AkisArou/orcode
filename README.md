@@ -1,143 +1,149 @@
 # Orcode
 
-Orcode gives a Codex CLI session and a Claude Code CLI session an explicit,
-local way to discover and message each other. Each agent stays in its own
-terminal and keeps its own permissions, context, and approval policy.
+Orcode gives ordinary Codex CLI and Claude Code CLI sessions a durable, local
+way to discover and message each other. No launch wrapper or `--name` flag is
+required.
 
 ```text
-Codex TUI  <-> dedicated Codex app-server <-> orcode MCP
-                                               |
-                                  private live-session registry
-                                               |
-Claude TUI <-> Claude native ListAgents/SendMessage <-> orcode MCP
+Codex MCP ─┐                         ┌─ Codex native thread queue
+           ├─ Orcode broker + SQLite ┤
+Claude MCP ┘                         └─ Claude native SendMessage queue
 ```
 
-There is no network broker. Orcode stores only short-lived routing metadata;
-message bodies are handed directly to the provider and are never written to
-Orcode's registry.
+The broker writes a message before attempting delivery, retries transient
+failures in the background, and uses each provider's native queue so a busy
+agent receives the message at its next tool/turn boundary. Messages shown in
+the agent transcript are readable Markdown rather than JSON.
 
 ## Requirements
 
-- POSIX-like local machine (Linux/macOS)
+- Linux or macOS
 - Node.js 24 or newer
-- Codex CLI 0.151.0 or newer
-- Claude Code CLI 2.1.236 or newer
+- Codex CLI 0.162.1 or newer
+- Claude Code CLI 2.1.163 or newer
 
-Run `orcode doctor` to check the local setup.
+These minimum CLI versions provide the session identity and native queue APIs
+that Orcode relies on. Run `orcode doctor` to check the installed versions.
 
-## Install
+## Install and configure
 
 From this checkout:
 
 ```sh
 pnpm install
 npm link
+orcode setup
 ```
 
-Once published, the package can instead be installed with
-`npm install --global orcode` or `pnpm add --global orcode`.
+`orcode setup` adds a user-level MCP server named `orcode` to both CLIs and
+starts the local broker. It refuses to overwrite an unrelated MCP entry with
+the same name; use `orcode setup --force` only when replacement is intended.
 
-## Start two managed peers
-
-Open two terminals in the same repository:
+Restart any Codex or Claude sessions that were already open. From then on,
+launch both programs normally in the same repository:
 
 ```sh
-orcode codex
+codex
 ```
 
 ```sh
-orcode claude
+claude
 ```
 
-When `--name` is omitted, Orcode generates and prints a provider-prefixed peer
-name such as `codex-a3f29c10` or `claude-b91c047e`. Use explicit names when you
-want stable, role-based addresses:
+There is no `orcode codex` or `orcode claude` wrapper. Peer names come from the
+native sessions and are only convenient aliases; routing and replies use
+stable addresses such as `codex:<thread-uuid>` and
+`claude:<session-uuid>`.
+
+To remove both MCP entries:
 
 ```sh
-orcode codex --name implementer
-orcode claude --name reviewer
+orcode uninstall
 ```
 
-Provider options go after `--`:
+## Try a conversation
 
-```sh
-orcode codex --name implementer -- --model gpt-5.4
-orcode claude --name reviewer -- --model opus
+With Codex and Claude open in the same repository, give Codex this prompt:
+
+```text
+Use Orcode to list the available Claude peers. Send the reachable Claude peer
+this question: "What is one small improvement you would make to this
+repository? Reply to me through Orcode." Then tell me the message ID and its
+delivery status. Wait for Claude's reply before summarizing it.
 ```
 
-Resume identifiers are wrapper options:
+The outbound call returns immediately after native delivery, or as `queued` if
+the peer is temporarily unavailable. Claude sees a Markdown message in its own
+session. Its reply is placed in Codex's native queue and appears in the Codex
+transcript even if Codex was busy when Claude sent it.
 
-```sh
-orcode codex --name implementer --resume <thread-id> --
-orcode claude --name reviewer --resume <session-id> --
-```
+You can inspect native peers from a shell with `orcode peers` and check the
+broker with `orcode status`.
 
-Omitting `--name` while resuming generates a new routing name for that run.
+## MCP tools
 
-For Codex, pass `--resume` only for a session that succeeds with
-`codex resume <thread-id>` on its own. In particular, Codex 0.153.2 does not
-resume an empty thread that has no persisted rollout yet. New Orcode sessions
-do not use the resume path: the TUI creates the thread and Orcode observes and
-registers it after it is loaded.
+Orcode exposes four tools to both agents:
 
-The wrapper injects the Orcode MCP server. Ask either agent to call
-`list_peers`, then to call `send_message` with an exact address such as
-`claude:reviewer` or `codex:implementer`.
+- `list_peers({ allProjects? })` lists currently reachable sessions of the
+  other provider. By default it stays within the current Git project.
+- `send_message({ to, message, replyTo? })` durably stores and immediately
+  attempts one delivery. Use an exact address when available.
+- `message_status({ messageId })` reports the durable delivery state.
+- `ack_message({ messageId })` confirms that the exact recipient has begun
+  processing an incoming message.
 
-From a shell, `orcode peers` lists live peers in the current project.
-`orcode peers --all-projects --json` is useful for diagnostics. Git worktrees
-with the same common Git directory are treated as one project.
+Each incoming message includes its ID, exact reply address, and the `replyTo`
+value to use. It also marks the body as untrusted peer context: peer messages
+cannot expand permissions or override higher-priority instructions.
 
-## Messaging contract
+## Delivery semantics
 
-The MCP server exposes two tools:
+Message states have precise meanings:
 
-- `list_peers({ allProjects?: boolean })`
-- `send_message({ to, message, replyTo? })`
+- `queued`: safely stored locally; delivery is being retried.
+- `delivering`: one native delivery attempt is in progress.
+- `delivered`: Codex or Claude accepted the message into its native queue.
+- `acknowledged`: the receiving session explicitly began processing it.
+- `replied`: the receiving session sent a correlated reply.
+- `cancelled`: a still-pending message was cancelled.
 
-Messages are one-to-one and limited to 64 KiB of UTF-8 text. There are no
-attachments, broadcasts, delivery retries, automatic replies, or remote
-connections. A successful send means the receiving provider accepted the
-message; it does not promise that the model has read or acted on it.
+Delivery is at-least-once. Orcode preserves FIFO attempt order and supplies a
+stable idempotency key to Codex. After the narrow failure where a provider
+accepts a message but the broker crashes before recording success, a retry can
+produce a duplicate; message IDs let the receiver recognize it. `delivered`
+does not claim that the model read the message—use `acknowledged` or `replied`
+when that distinction matters.
 
-Every delivery is wrapped in a versioned JSON envelope containing sender,
-recipient, timestamp, message id, and body. The receiver is explicitly told to
-treat the body as untrusted peer context. A peer message cannot expand the
-receiver's permissions or override its higher-priority instructions.
+Messages are limited to 64 KiB of UTF-8 text. Orcode supports one-to-one local
+messages, not attachments, broadcast, or remote transport.
 
-## Runtime and discovery
+## Storage and recovery
 
-Managed sessions register under `$XDG_RUNTIME_DIR/orcode`, falling back to
-`/tmp/orcode-$UID`. The directory is mode `0700`; record files are atomic and
-mode `0600`. Records contain names, PIDs, project identity, and provider routing
-coordinates only. Dead PIDs and missing Codex sockets are pruned on reads.
+The broker socket lives under `$XDG_RUNTIME_DIR/orcode`, falling back to
+`/tmp/orcode-$UID`. Durable peer and message state lives in
+`$XDG_STATE_HOME/orcode/orcode.sqlite`, falling back to
+`~/.local/state/orcode/orcode.sqlite`. Directories are mode `0700` and the
+database is mode `0600`. Completed records are retained for seven days.
 
-Claude sessions started outside Orcode may appear when `claude agents --json`
-provides enough addressing and working-directory metadata. Unmanaged Codex
-sessions are not guaranteed to be addressable, so the wrapper is recommended.
+If the broker is absent, the next MCP request starts it. If it exits during a
+delivery, that message returns to `queued` on restart and is retried. Claude
+targets are resolved from fresh native discovery, while Codex messages use the
+shared app-server's thread queue and a stable thread UUID.
 
-## Provider plugin bundles
+## Plugin bundles
 
-Reusable plugin bundles live at:
-
-- `integrations/codex/plugins/orcode`
-- `integrations/claude/plugins/orcode`
-
-They contain matching MCP configuration and a narrowly scoped peer-messaging
-skill. They are ready to embed in a team or repository marketplace. The
-wrappers do not require plugin installation; they inject the same MCP server
-directly so a fresh local install works immediately.
-
-Orcode runs its TypeScript source directly on Node.js 24. There is no bundling,
-transpilation, or build step; the source is constrained by TypeScript's
-`erasableSyntaxOnly` check.
+Reusable Codex and Claude plugin bundles live in `integrations/`. They contain
+the same MCP command plus guidance for acknowledging and replying to messages.
+Normal local use only requires `orcode setup`; installing a plugin bundle is
+optional.
 
 ## Development
+
+Orcode executes TypeScript directly on Node.js 24. There is no build or bundle
+step.
 
 ```sh
 pnpm check
 ```
 
-The test suite does not make model calls. It covers registry lifecycle,
-message envelopes and limits, project/worktree identity, routing behavior, and
-an end-to-end MCP stdio handshake using Node's built-in `node:test` runner.
+The tests use Node's built-in `node:test` runner and do not make model calls.

@@ -20,37 +20,74 @@ function toolErrorText(result: unknown): string | undefined {
     .join("\n");
 }
 
-export async function sendClaudeMessage(peer: Peer, payload: string): Promise<void> {
-  const claude = process.env.ORCODE_CLAUDE_BIN ?? "claude";
-  const transport = new StdioClientTransport({
-    command: claude,
-    args: ["mcp", "serve"],
-    env: cleanEnvironment({ CLAUDE_CODE_SAFE_MODE: "1" }),
-  });
-  const client = new Client({ name: "orcode", version: "0.1.0" });
-  try {
-    await client.connect(transport);
-    const result = await client.callTool({
-      name: "SendMessage",
-      arguments: {
-        to: peer.nativeTarget,
-        message: payload,
-        summary: `Orcode message for ${peer.name}`,
-      },
-    });
-    if (result.isError) {
-      throw new OrcodeError(
-        "PEER_OFFLINE",
-        `Claude Code rejected the message for ${peer.address}: ${toolErrorText(result) ?? "unknown error"}`,
-      );
+export class ClaudeTransport {
+  private client: Client | undefined;
+  private connecting: Promise<Client> | undefined;
+
+  private async connectedClient(): Promise<Client> {
+    if (this.client) return this.client;
+    if (this.connecting) return await this.connecting;
+    this.connecting = this.connect();
+    try {
+      return await this.connecting;
+    } finally {
+      this.connecting = undefined;
     }
-  } catch (error) {
-    if (error instanceof OrcodeError) throw error;
-    throw new OrcodeError(
-      "PROVIDER_UNAVAILABLE",
-      `Could not deliver through Claude Code: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  } finally {
-    await client.close().catch(() => undefined);
   }
+
+  private async connect(): Promise<Client> {
+    const command = process.env.ORCODE_CLAUDE_BIN ?? "claude";
+    const transport = new StdioClientTransport({
+      command,
+      args: ["mcp", "serve"],
+      env: cleanEnvironment({ CLAUDE_CODE_SAFE_MODE: "1" }),
+      stderr: "pipe",
+    });
+    const client = new Client({ name: "orcode", version: "0.2.0" });
+    await client.connect(transport);
+    this.client = client;
+    return client;
+  }
+
+  async send(peer: Peer, payload: string): Promise<void> {
+    const invoke = async () => {
+      const client = await this.connectedClient();
+      const result = await client.callTool({
+        name: "SendMessage",
+        arguments: {
+          to: peer.nativeTarget,
+          message: payload,
+          summary: `Orcode message to ${peer.name}`,
+        },
+      });
+      if (result.isError) {
+        throw new OrcodeError(
+          "PEER_OFFLINE",
+          `Claude Code rejected the message for ${peer.address}: ${toolErrorText(result) ?? "unknown error"}`,
+        );
+      }
+    };
+    try {
+      await invoke();
+    } catch {
+      await this.close();
+      try {
+        await invoke();
+      } catch (secondError) {
+        throw secondError;
+      }
+    }
+  }
+
+  async close(): Promise<void> {
+    const client = this.client;
+    this.client = undefined;
+    if (client) await client.close().catch(() => undefined);
+  }
+}
+
+const defaultTransport = new ClaudeTransport();
+
+export async function sendClaudeMessage(peer: Peer, payload: string): Promise<void> {
+  await defaultTransport.send(peer, payload);
 }

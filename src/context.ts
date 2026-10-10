@@ -1,39 +1,81 @@
+import { discoverNativeClaudePeers, discoverNativeCodexPeers } from "./discovery.ts";
+import { OrcodeError } from "./errors.ts";
 import { identifyProject } from "./project.ts";
 import type { Provider, SelfContext } from "./types.ts";
 
-function isProvider(value: string | undefined): value is Provider {
-  return value === "codex" || value === "claude";
+type HandlerExtra = { _meta?: Record<string, unknown> };
+
+function requestThreadId(extra: HandlerExtra): string | undefined {
+  const meta = extra._meta;
+  return typeof meta?.threadId === "string" && meta.threadId !== ""
+    ? meta.threadId
+    : undefined;
 }
 
-export function selfContext(
-  requestedProvider?: Provider,
-  environment = process.env,
-): SelfContext {
-  const cwd = environment.ORCODE_CWD ?? process.cwd();
-  const project = identifyProject(cwd);
-  const provider = isProvider(environment.ORCODE_PROVIDER)
-    ? environment.ORCODE_PROVIDER
-    : requestedProvider;
-  const name = environment.ORCODE_NAME ?? `unmanaged-${process.ppid}`;
-  return {
-    ...(provider === undefined ? {} : { provider }),
-    name,
-    address:
-      environment.ORCODE_ADDRESS ??
-      (provider === undefined ? `session:${name}` : `${provider}:${name}`),
-    cwd,
-    projectId: environment.ORCODE_PROJECT_ID ?? project.id,
-    projectRoot: environment.ORCODE_PROJECT_ROOT ?? project.root,
-  };
+function explicitSessionId(provider: Provider, environment: NodeJS.ProcessEnv): string | undefined {
+  const value = environment.ORCODE_SESSION_ID;
+  if (!value) return undefined;
+  const prefix = `${provider}:`;
+  return value.startsWith(prefix) ? value.slice(prefix.length) : value;
 }
 
-export function contextEnvironment(context: SelfContext): Record<string, string> {
-  return {
-    ...(context.provider === undefined ? {} : { ORCODE_PROVIDER: context.provider }),
-    ORCODE_NAME: context.name,
-    ORCODE_ADDRESS: context.address,
-    ORCODE_CWD: context.cwd,
-    ORCODE_PROJECT_ID: context.projectId,
-    ORCODE_PROJECT_ROOT: context.projectRoot,
-  };
+export async function resolveSelfContext(
+  provider: Provider,
+  extra: HandlerExtra,
+  environment: NodeJS.ProcessEnv = process.env,
+  hostPid = process.ppid,
+): Promise<SelfContext> {
+  if (provider === "codex") {
+    const sessionId = requestThreadId(extra) ?? explicitSessionId(provider, environment);
+    if (!sessionId) {
+      throw new OrcodeError(
+        "SELF_NOT_IDENTIFIED",
+        "Codex did not attach a threadId to this MCP call. Update Codex and restart the session.",
+      );
+    }
+    const peer = (await discoverNativeCodexPeers()).find(
+      (candidate) => candidate.sessionId === sessionId,
+    );
+    if (peer) return { ...peer, hostPid };
+    const cwd = environment.ORCODE_CWD ?? process.cwd();
+    const project = identifyProject(cwd);
+    return {
+      provider,
+      sessionId,
+      name: `Codex ${sessionId.slice(0, 8)}`,
+      address: `codex:${sessionId}`,
+      hostPid,
+      cwd,
+      projectId: project.id,
+      projectRoot: project.root,
+    };
+  }
+
+  const peers = await discoverNativeClaudePeers();
+  const environmentId =
+    environment.CLAUDE_CODE_SESSION_ID ?? explicitSessionId(provider, environment);
+  const peer =
+    peers.find((candidate) => candidate.hostPid === hostPid) ??
+    (environmentId
+      ? peers.find((candidate) => candidate.sessionId === environmentId)
+      : undefined);
+  if (peer) return { ...peer, hostPid };
+  if (environmentId) {
+    const cwd = environment.CLAUDE_PROJECT_DIR ?? environment.ORCODE_CWD ?? process.cwd();
+    const project = identifyProject(cwd);
+    return {
+      provider,
+      sessionId: environmentId,
+      name: `Claude ${environmentId.slice(0, 8)}`,
+      address: `claude:${environmentId}`,
+      hostPid,
+      cwd,
+      projectId: project.id,
+      projectRoot: project.root,
+    };
+  }
+  throw new OrcodeError(
+    "SELF_NOT_IDENTIFIED",
+    "Claude did not expose a session ID for this MCP process. Update Claude Code and restart the session.",
+  );
 }

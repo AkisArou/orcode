@@ -6,7 +6,11 @@ export type OrcodeErrorCode =
   | "PEER_OFFLINE"
   | "SELF_TARGET"
   | "PROVIDER_UNAVAILABLE"
-  | "PROTOCOL_ERROR";
+  | "PROTOCOL_ERROR"
+  | "SELF_NOT_IDENTIFIED"
+  | "MESSAGE_NOT_FOUND"
+  | "MESSAGE_NOT_OWNED"
+  | "SETUP_CONFLICT";
 
 export class OrcodeError extends Error {
   public readonly code: OrcodeErrorCode;

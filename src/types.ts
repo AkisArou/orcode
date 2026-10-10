@@ -7,38 +7,28 @@ export interface ProjectIdentity {
   kind: "git" | "directory";
 }
 
-export interface SessionRecord {
-  version: 1;
-  id: string;
-  provider: Provider;
-  name: string;
-  address: string;
-  nativeTarget: string;
-  pid: number;
-  cwd: string;
-  projectId: string;
-  projectRoot: string;
-  createdAt: string;
-  socketPath?: string;
-  threadId?: string;
-}
+export type PeerStatus = "reachable" | "offline";
 
 export interface Peer {
   provider: Provider;
+  sessionId: string;
   name: string;
   address: string;
+  cwd: string;
+  projectId: string;
   projectRoot: string;
-  status: "reachable";
-  managed: boolean;
+  status: PeerStatus;
   nativeTarget: string;
-  socketPath?: string;
+  hostPid?: number;
   threadId?: string;
 }
 
 export interface SelfContext {
-  provider?: Provider;
+  provider: Provider;
+  sessionId: string;
   name: string;
   address: string;
+  hostPid?: number;
   cwd: string;
   projectId: string;
   projectRoot: string;
@@ -46,10 +36,11 @@ export interface SelfContext {
 
 export interface PeerMessageEnvelope {
   protocol: "orcode.peer-message";
-  version: 1;
+  version: 2;
   id: string;
   from: {
     provider: Provider;
+    sessionId: string;
     name: string;
     address: string;
   };
@@ -59,8 +50,29 @@ export interface PeerMessageEnvelope {
   body: string;
 }
 
-export interface SendResult {
+export type MessageState =
+  | "queued"
+  | "delivering"
+  | "delivered"
+  | "held"
+  | "acknowledged"
+  | "replied"
+  | "failed"
+  | "cancelled";
+
+export interface MessageStatus {
   messageId: string;
-  status: "accepted";
+  state: MessageState;
+  from: string;
+  to: string;
+  attempts: number;
+  queuedAt: string;
+  deliveredAt?: string;
+  acknowledgedAt?: string;
+  repliedAt?: string;
+  lastError?: string;
+}
+
+export interface SendResult extends MessageStatus {
   peer: Peer;
 }

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import WebSocket, { type RawData } from "ws";
 import { OrcodeError } from "../errors.ts";
 import { runProcess } from "../process.ts";
@@ -15,11 +16,35 @@ type RpcResponse = {
   error?: { code?: number; message?: string; data?: unknown };
 };
 
+export interface CodexDaemonInfo {
+  status: string;
+  socketPath: string;
+  cliVersion?: string;
+  appServerVersion?: string;
+}
+
+export async function codexDaemonInfo(): Promise<CodexDaemonInfo | undefined> {
+  const command = process.env.ORCODE_CODEX_BIN ?? "codex";
+  try {
+    const result = await runProcess(command, ["app-server", "daemon", "version"], {
+      timeoutMs: 5_000,
+    });
+    if (result.exitCode !== 0) return undefined;
+    const value = JSON.parse(result.stdout) as Partial<CodexDaemonInfo>;
+    return value.status === "running" && typeof value.socketPath === "string"
+      ? (value as CodexDaemonInfo)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export class CodexAppServerClient {
   private readonly socket: WebSocket;
   private readonly ready: Promise<void>;
   private readonly pending = new Map<number, PendingRequest>();
   private nextId = 1;
+  private closed = false;
 
   private constructor(socketPath: string) {
     this.socket = new WebSocket(`ws+unix://${socketPath}:/`, {
@@ -33,11 +58,9 @@ export class CodexAppServerClient {
     this.socket.on("message", (data) => this.handleData(data));
     this.socket.on("error", (error) => this.failAll(error));
     this.socket.on("close", () => {
+      this.closed = true;
       this.failAll(
-        new OrcodeError(
-          "PROVIDER_UNAVAILABLE",
-          "Codex app-server WebSocket connection closed.",
-        ),
+        new OrcodeError("PROVIDER_UNAVAILABLE", "Codex app-server connection closed."),
       );
     });
   }
@@ -46,18 +69,23 @@ export class CodexAppServerClient {
     const client = new CodexAppServerClient(socketPath);
     try {
       await client.ready;
+      await client.request("initialize", {
+        clientInfo: { name: "orcode", title: "Orcode", version: "0.2.0" },
+        capabilities: { experimentalApi: true },
+      });
+      client.notify("initialized", {});
+      return client;
     } catch (error) {
+      client.close();
       throw new OrcodeError(
         "PROVIDER_UNAVAILABLE",
         `Could not connect to Codex app-server at ${socketPath}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-    await client.request("initialize", {
-      clientInfo: { name: "orcode", title: "Orcode", version: "0.1.0" },
-      capabilities: { experimentalApi: false },
-    });
-    client.notify("initialized", {});
-    return client;
+  }
+
+  isClosed(): boolean {
+    return this.closed || this.socket.readyState !== WebSocket.OPEN;
   }
 
   async request(method: string, params: Record<string, unknown>): Promise<unknown> {
@@ -74,7 +102,13 @@ export class CodexAppServerClient {
       }, 10_000);
       timer.unref();
       this.pending.set(id, { resolve, reject, timer });
-      this.write({ id, method, params });
+      try {
+        this.write({ id, method, params });
+      } catch (error) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(error);
+      }
     });
   }
 
@@ -83,6 +117,7 @@ export class CodexAppServerClient {
   }
 
   close(): void {
+    this.closed = true;
     if (this.socket.readyState === WebSocket.OPEN) this.socket.close();
     else if (this.socket.readyState !== WebSocket.CLOSED) this.socket.terminate();
   }
@@ -101,7 +136,7 @@ export class CodexAppServerClient {
     try {
       this.handleMessage(JSON.parse(data.toString()) as RpcResponse);
     } catch {
-      // Ignore non-protocol frames. A matching request will still time out clearly.
+      // A matching request will time out with a useful error.
     }
   }
 
@@ -119,9 +154,9 @@ export class CodexAppServerClient {
           { rpcCode: message.error.code, data: message.error.data },
         ),
       );
-      return;
+    } else {
+      request.resolve(message.result);
     }
-    request.resolve(message.result);
   }
 
   private failAll(error: Error): void {
@@ -133,86 +168,62 @@ export class CodexAppServerClient {
   }
 }
 
-function extractLoadedThreadIds(result: unknown): string[] {
-  if (!result || typeof result !== "object") {
-    throw new OrcodeError("PROTOCOL_ERROR", "Codex did not return loaded threads.");
-  }
-  const data = (result as { data?: unknown }).data;
-  if (!Array.isArray(data) || !data.every((id) => typeof id === "string")) {
-    throw new OrcodeError(
-      "PROTOCOL_ERROR",
-      "Codex returned invalid loaded-thread metadata.",
-    );
-  }
-  return data;
-}
+export class CodexTransport {
+  private client: CodexAppServerClient | undefined;
+  private socketPath: string | undefined;
 
-export async function waitForCodexThread(
-  socketPath: string,
-  name: string,
-  isTerminalAlive: () => boolean,
-  timeoutMs = 30_000,
-): Promise<string> {
-  const client = await CodexAppServerClient.connect(socketPath);
-  try {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      if (!isTerminalAlive()) {
-        throw new OrcodeError(
-          "PROVIDER_UNAVAILABLE",
-          "Codex CLI exited before loading its thread.",
-        );
-      }
-      const result = await client.request("thread/loaded/list", {});
-      const threadIds = extractLoadedThreadIds(result);
-      if (threadIds.length === 1) {
-        const threadId = threadIds[0] as string;
-        await client.request("thread/name/set", { threadId, name });
-        return threadId;
-      }
-      if (threadIds.length > 1) {
-        throw new OrcodeError(
-          "PROTOCOL_ERROR",
-          "The dedicated Codex app-server loaded more than one bootstrap thread.",
-          { threadIds },
-        );
-      }
-      await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+  async clientForDaemon(): Promise<CodexAppServerClient> {
+    if (this.client && !this.client.isClosed()) return this.client;
+    const info = await codexDaemonInfo();
+    if (!info) {
+      throw new OrcodeError(
+        "PROVIDER_UNAVAILABLE",
+        "The shared Codex app-server daemon is not running.",
+      );
     }
-    throw new OrcodeError(
-      "PROVIDER_UNAVAILABLE",
-      "Timed out waiting for the Codex TUI to load its thread.",
-    );
-  } finally {
-    client.close();
+    if (!this.client || this.client.isClosed() || this.socketPath !== info.socketPath) {
+      this.client?.close();
+      this.socketPath = info.socketPath;
+      this.client = await CodexAppServerClient.connect(info.socketPath);
+    }
+    return this.client;
+  }
+
+  async send(peer: Peer, payload: string, messageId: string): Promise<void> {
+    const threadId = peer.threadId ?? peer.sessionId;
+    const send = async () => {
+      const client = await this.clientForDaemon();
+      await client.request("thread/queue/add", {
+        threadId,
+        input: [{ type: "text", text: payload, textElements: [] }],
+        clientUserMessageId: messageId,
+      });
+    };
+    try {
+      await send();
+    } catch {
+      this.client?.close();
+      this.client = undefined;
+      try {
+        await send();
+      } catch (secondError) {
+        throw secondError;
+      }
+    }
+  }
+
+  close(): void {
+    this.client?.close();
+    this.client = undefined;
   }
 }
 
-export async function sendCodexMessage(peer: Peer, payload: string): Promise<void> {
-  if (!peer.socketPath || !peer.threadId) {
-    throw new OrcodeError(
-      "PEER_OFFLINE",
-      `${peer.address} is not a managed Codex peer and has no queue endpoint.`,
-    );
-  }
-  const codex = process.env.ORCODE_CODEX_BIN ?? "codex";
-  const result = await runProcess(
-    codex,
-    [
-      "queue",
-      "--remote",
-      `unix://${peer.socketPath}`,
-      "--thread",
-      peer.threadId,
-      "--message",
-      payload,
-    ],
-    { timeoutMs: 15_000 },
-  );
-  if (result.exitCode !== 0) {
-    throw new OrcodeError(
-      "PEER_OFFLINE",
-      `Codex rejected the message for ${peer.address}: ${result.stderr.trim() || result.stdout.trim() || `exit ${result.exitCode}`}`,
-    );
-  }
+const defaultTransport = new CodexTransport();
+
+export async function sendCodexMessage(
+  peer: Peer,
+  payload: string,
+  messageId = randomUUID(),
+): Promise<void> {
+  await defaultTransport.send(peer, payload, messageId);
 }

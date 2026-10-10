@@ -1,7 +1,7 @@
 {
   "name": "orcode",
-  "version": "0.1.0",
-  "description": "Local peer messaging between Codex CLI and Claude Code CLI sessions.",
+  "version": "0.2.0",
+  "description": "Durable local messaging between Codex CLI and Claude Code CLI sessions.",
   "author": {
     "name": "Orcode contributors"
   },

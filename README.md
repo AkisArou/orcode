@@ -5,15 +5,16 @@ way to discover and message each other. No launch wrapper or `--name` flag is
 required.
 
 ```text
-Codex MCP ─┐                         ┌─ Codex native thread queue
+Codex MCP ─┐                         ┌─ Codex turn steer / thread queue
            ├─ Orcode broker + SQLite ┤
 Claude MCP ┘                         └─ Claude native SendMessage queue
 ```
 
-The broker writes a message before attempting delivery, retries transient
-failures in the background, and uses each provider's native queue so a busy
-agent receives the message at its next tool/turn boundary. Messages shown in
-the agent transcript are readable Markdown rather than JSON.
+The broker writes a message before attempting delivery and retries transient
+failures in the background. Claude messages use its native queue. A correlated
+reply to a busy Codex session is steered into its active turn; new messages and
+steering races use Codex's thread queue. Messages shown in the agent transcript
+are readable Markdown rather than JSON.
 
 ## Requirements
 
@@ -113,6 +114,12 @@ accepts a message but the broker crashes before recording success, a retry can
 produce a duplicate; message IDs let the receiver recognize it. `delivered`
 does not claim that the model read the message—use `acknowledged` or `replied`
 when that distinction matters.
+
+For Codex, only correlated replies with a `replyTo` value are eligible for
+mid-turn steering. Orcode first verifies that the newest turn is still in
+progress. If the turn ends, rejects steering, or cannot be steered, the same
+durable message falls back to the thread queue. New requests never steer or
+interrupt active work.
 
 Messages are limited to 64 KiB of UTF-8 text. Orcode supports one-to-one local
 messages, not attachments, broadcast, or remote transport.

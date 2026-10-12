@@ -29,6 +29,18 @@ const claude: Peer = {
   status: "reachable",
   nativeTarget: "Reviewer [claude-s]",
 };
+const codex: Peer = {
+  provider: "codex",
+  sessionId: "codex-session",
+  threadId: "codex-session",
+  name: "MainCodex",
+  address: "codex:codex-session",
+  cwd: "/project",
+  projectId: "project",
+  projectRoot: "/project",
+  status: "reachable",
+  nativeTarget: "codex-session",
+};
 
 function store(): MessageStore {
   const root = mkdtempSync(join(tmpdir(), "orcode-store-test-"));
@@ -176,6 +188,44 @@ describe("durable broker", () => {
       assert.match(status?.lastError ?? "", /Broker restarted/u);
     } finally {
       recovered.close();
+    }
+  });
+
+  it("makes only correlated replies eligible for Codex steering", async () => {
+    const deliverCodex = mock.fn(
+      async (
+        _peer: Peer,
+        _payload: string,
+        _messageId: string,
+        _preferSteer: boolean,
+      ) => undefined,
+    );
+    const broker = new Broker({
+      store: store(),
+      discover: async () => [codex, claude],
+      discoverClaude: async () => [claude],
+      deliverCodex,
+      deliverClaude: async () => undefined,
+    });
+    const claudeSelf: SelfContext = {
+      provider: "claude",
+      sessionId: claude.sessionId,
+      name: claude.name,
+      address: claude.address,
+      cwd: claude.cwd,
+      projectId: claude.projectId,
+      projectRoot: claude.projectRoot,
+    };
+    try {
+      const request = await broker.send(self, claude.address, "Please review this.");
+      await broker.send(claudeSelf, codex.address, "Here is the review.", request.messageId);
+      await broker.send(claudeSelf, codex.address, "An unrelated note.");
+
+      assert.equal(deliverCodex.mock.callCount(), 2);
+      assert.equal(deliverCodex.mock.calls[0]?.arguments[3], true);
+      assert.equal(deliverCodex.mock.calls[1]?.arguments[3], false);
+    } finally {
+      await broker.close();
     }
   });
 });

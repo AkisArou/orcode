@@ -16,6 +16,28 @@ type RpcResponse = {
   error?: { code?: number; message?: string; data?: unknown };
 };
 
+type TurnListResponse = {
+  data?: Array<{ id?: unknown; status?: unknown }>;
+};
+
+export interface CodexDeliveryOptions {
+  preferSteer?: boolean;
+}
+
+function inProgressTurnId(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const turns = (value as TurnListResponse).data;
+  if (!Array.isArray(turns)) return undefined;
+  const turn = turns[0];
+  return turn?.status === "inProgress" && typeof turn.id === "string"
+    ? turn.id
+    : undefined;
+}
+
+function isProtocolRejection(error: unknown): boolean {
+  return error instanceof OrcodeError && error.code === "PROTOCOL_ERROR";
+}
+
 export interface CodexDaemonInfo {
   status: string;
   socketPath: string;
@@ -189,10 +211,21 @@ export class CodexTransport {
     return this.client;
   }
 
-  async send(peer: Peer, payload: string, messageId: string): Promise<void> {
+  async send(
+    peer: Peer,
+    payload: string,
+    messageId: string,
+    options: CodexDeliveryOptions = {},
+  ): Promise<void> {
     const threadId = peer.threadId ?? peer.sessionId;
     const send = async () => {
       const client = await this.clientForDaemon();
+      if (
+        options.preferSteer === true &&
+        (await this.trySteer(client, threadId, payload, messageId))
+      ) {
+        return;
+      }
       await client.request("thread/queue/add", {
         threadId,
         input: [{ type: "text", text: payload, textElements: [] }],
@@ -212,6 +245,41 @@ export class CodexTransport {
     }
   }
 
+  private async trySteer(
+    client: CodexAppServerClient,
+    threadId: string,
+    payload: string,
+    messageId: string,
+  ): Promise<boolean> {
+    let turnId: string | undefined;
+    try {
+      const turns = await client.request("thread/turns/list", {
+        threadId,
+        limit: 1,
+        sortDirection: "desc",
+        itemsView: "notLoaded",
+      });
+      turnId = inProgressTurnId(turns);
+    } catch (error) {
+      if (isProtocolRejection(error)) return false;
+      throw error;
+    }
+    if (!turnId) return false;
+
+    try {
+      await client.request("turn/steer", {
+        threadId,
+        expectedTurnId: turnId,
+        input: [{ type: "text", text: payload, textElements: [] }],
+        clientUserMessageId: messageId,
+      });
+      return true;
+    } catch (error) {
+      if (isProtocolRejection(error)) return false;
+      throw error;
+    }
+  }
+
   close(): void {
     this.client?.close();
     this.client = undefined;
@@ -224,6 +292,7 @@ export async function sendCodexMessage(
   peer: Peer,
   payload: string,
   messageId = randomUUID(),
+  options: CodexDeliveryOptions = {},
 ): Promise<void> {
-  await defaultTransport.send(peer, payload, messageId);
+  await defaultTransport.send(peer, payload, messageId, options);
 }

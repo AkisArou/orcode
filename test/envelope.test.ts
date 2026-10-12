@@ -33,6 +33,7 @@ describe("peer envelope", () => {
     assert.match(text, /## Message/u);
     assert.match(text, /Please review the patch\./u);
     assert.match(text, /codex:codex-session/u);
+    assert.ok(text.includes(`Sent \`${envelope.sentAt}\``));
     assert.doesNotMatch(text, /"protocol":/u);
   });
 });

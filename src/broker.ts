@@ -18,7 +18,12 @@ export interface BrokerDependencies {
   store?: MessageStore;
   discover?: typeof discoverAllNativePeers;
   discoverClaude?: typeof discoverNativeClaudePeers;
-  deliverCodex?: (peer: Peer, payload: string, messageId: string) => Promise<void>;
+  deliverCodex?: (
+    peer: Peer,
+    payload: string,
+    messageId: string,
+    preferSteer: boolean,
+  ) => Promise<void>;
   deliverClaude?: (peer: Peer, payload: string) => Promise<void>;
 }
 
@@ -43,7 +48,12 @@ export class Broker {
   private readonly discoverClaude: typeof discoverNativeClaudePeers;
   private readonly codexTransport: CodexTransport;
   private readonly claudeTransport: ClaudeTransport;
-  private readonly deliverCodex: (peer: Peer, payload: string, messageId: string) => Promise<void>;
+  private readonly deliverCodex: (
+    peer: Peer,
+    payload: string,
+    messageId: string,
+    preferSteer: boolean,
+  ) => Promise<void>;
   private readonly deliverClaude: (peer: Peer, payload: string) => Promise<void>;
   private readonly deliveryTails = new Map<string, Promise<void>>();
   private livePeers: Peer[] = [];
@@ -64,7 +74,8 @@ export class Broker {
     this.claudeTransport = new ClaudeTransport();
     this.deliverCodex =
       dependencies.deliverCodex ??
-      ((peer, payload, messageId) => this.codexTransport.send(peer, payload, messageId));
+      ((peer, payload, messageId, preferSteer) =>
+        this.codexTransport.send(peer, payload, messageId, { preferSteer }));
     this.deliverClaude =
       dependencies.deliverClaude ??
       ((peer, payload) => this.claudeTransport.send(peer, payload));
@@ -211,7 +222,12 @@ export class Broker {
         }
         await this.deliverClaude(peer, serializeEnvelope(envelope));
       } else {
-        await this.deliverCodex(peer, serializeEnvelope(envelope), envelope.id);
+        await this.deliverCodex(
+          peer,
+          serializeEnvelope(envelope),
+          envelope.id,
+          envelope.replyTo !== undefined,
+        );
       }
       this.store.markDelivered(messageId);
     } catch (error) {

@@ -1,4 +1,4 @@
-export type Provider = "codex" | "claude";
+export type Provider = "codex" | "claude" | "muse";
 
 export interface ProjectIdentity {
   id: string;

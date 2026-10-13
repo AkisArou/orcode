@@ -1,5 +1,6 @@
 import { accessSync, chmodSync, constants, mkdirSync, statSync } from "node:fs";
 import { ensureBroker } from "./broker.ts";
+import { discoverNativeMusePeers } from "./discovery.ts";
 import { commandVersion, runProcess } from "./process.ts";
 import { ensureRuntimeRoot } from "./runtime.ts";
 import { configuredHosts } from "./setup.ts";
@@ -60,6 +61,13 @@ export async function doctor(): Promise<DoctorCheck[]> {
     detail: `${claudeVersion ?? "not found"} (requires >=2.1.163)`,
   });
 
+  const museVersion = commandVersion(process.env.ORCODE_MUSE_BIN ?? "muse");
+  checks.push({
+    name: "Muse",
+    ok: atLeast(numericVersion(museVersion), [1, 4, 7]),
+    detail: `${museVersion ?? "not found"} (requires >=1.4.7)`,
+  });
+
   const runtime = ensureRuntimeRoot();
   checks.push({
     name: "Runtime directory",
@@ -85,6 +93,11 @@ export async function doctor(): Promise<DoctorCheck[]> {
       ok: configured.claude,
       detail: configured.claude ? "orcode is configured at user scope" : "run orcode setup",
     });
+    checks.push({
+      name: "Muse MCP",
+      ok: configured.muse,
+      detail: configured.muse ? "orcode is configured at user scope" : "run orcode setup",
+    });
   } catch (error) {
     checks.push({
       name: "MCP configuration",
@@ -108,6 +121,23 @@ export async function doctor(): Promise<DoctorCheck[]> {
     } catch (error) {
       checks.push({
         name: "Claude session discovery",
+        ok: false,
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  if (museVersion) {
+    try {
+      const peers = await discoverNativeMusePeers();
+      checks.push({
+        name: "Muse session discovery",
+        ok: true,
+        detail: `${peers.length} live Muse session${peers.length === 1 ? "" : "s"} found`,
+      });
+    } catch (error) {
+      checks.push({
+        name: "Muse session discovery",
         ok: false,
         detail: error instanceof Error ? error.message : String(error),
       });

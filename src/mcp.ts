@@ -82,7 +82,7 @@ export async function runMcpServer(host: Provider): Promise<void> {
     {
       title: "Send an Orcode peer message",
       description:
-        "Durably send one message to a Codex or Claude peer. Prefer an exact canonical address. Use replyTo when answering an incoming Orcode message; correlated replies may be steered into an active Codex turn, while new messages use its queue.",
+        "Durably send one message to a Codex, Claude, or Muse peer. Prefer an exact canonical address. Use replyTo when answering an incoming Orcode message; correlated replies may be steered into an active Codex turn, while new messages use its queue.",
       inputSchema: {
         to: z.string().min(1).describe("Exact peer address, or a unique live peer name."),
         message: z.string().min(1).describe("Message body, up to 64 KiB UTF-8."),

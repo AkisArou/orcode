@@ -3,13 +3,18 @@ import { spawn } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import { createConnection, createServer, type Socket } from "node:net";
 import { resolve } from "node:path";
-import { discoverAllNativePeers, discoverNativeClaudePeers } from "./discovery.ts";
+import {
+  discoverAllNativePeers,
+  discoverNativeClaudePeers,
+  discoverNativeMusePeers,
+} from "./discovery.ts";
 import { createEnvelope, serializeEnvelope } from "./envelope.ts";
 import { errorPayload, OrcodeError } from "./errors.ts";
 import { ensureRuntimeRoot, runtimeRoot } from "./runtime.ts";
 import { MessageStore } from "./storage.ts";
 import { ClaudeTransport } from "./transports/claude.ts";
 import { CodexTransport } from "./transports/codex.ts";
+import { MuseTransport } from "./transports/muse.ts";
 import type { MessageStatus, Peer, SelfContext, SendResult } from "./types.ts";
 
 export const BROKER_PROTOCOL_VERSION = 1;
@@ -18,6 +23,7 @@ export interface BrokerDependencies {
   store?: MessageStore;
   discover?: typeof discoverAllNativePeers;
   discoverClaude?: typeof discoverNativeClaudePeers;
+  discoverMuse?: typeof discoverNativeMusePeers;
   deliverCodex?: (
     peer: Peer,
     payload: string,
@@ -25,6 +31,7 @@ export interface BrokerDependencies {
     preferSteer: boolean,
   ) => Promise<void>;
   deliverClaude?: (peer: Peer, payload: string) => Promise<void>;
+  deliverMuse?: (peer: Peer, payload: string, messageId: string) => Promise<void>;
 }
 
 function asPeer(self: SelfContext): Peer {
@@ -46,8 +53,10 @@ export class Broker {
   readonly store: MessageStore;
   private readonly discover: typeof discoverAllNativePeers;
   private readonly discoverClaude: typeof discoverNativeClaudePeers;
+  private readonly discoverMuse: typeof discoverNativeMusePeers;
   private readonly codexTransport: CodexTransport;
   private readonly claudeTransport: ClaudeTransport;
+  private readonly museTransport: MuseTransport;
   private readonly deliverCodex: (
     peer: Peer,
     payload: string,
@@ -55,6 +64,7 @@ export class Broker {
     preferSteer: boolean,
   ) => Promise<void>;
   private readonly deliverClaude: (peer: Peer, payload: string) => Promise<void>;
+  private readonly deliverMuse: (peer: Peer, payload: string, messageId: string) => Promise<void>;
   private readonly deliveryTails = new Map<string, Promise<void>>();
   private livePeers: Peer[] = [];
   private discoveryAt = 0;
@@ -62,6 +72,9 @@ export class Broker {
   private claudePeers: Peer[] = [];
   private claudeDiscoveryAt = 0;
   private discoveringClaude: Promise<Peer[]> | undefined;
+  private musePeers: Peer[] = [];
+  private museDiscoveryAt = 0;
+  private discoveringMuse: Promise<Peer[]> | undefined;
   private processing: Promise<void> | undefined;
   private retryTimer: NodeJS.Timeout | undefined;
   private closed = false;
@@ -70,8 +83,10 @@ export class Broker {
     this.store = dependencies.store ?? new MessageStore();
     this.discover = dependencies.discover ?? discoverAllNativePeers;
     this.discoverClaude = dependencies.discoverClaude ?? discoverNativeClaudePeers;
+    this.discoverMuse = dependencies.discoverMuse ?? discoverNativeMusePeers;
     this.codexTransport = new CodexTransport();
     this.claudeTransport = new ClaudeTransport();
+    this.museTransport = new MuseTransport();
     this.deliverCodex =
       dependencies.deliverCodex ??
       ((peer, payload, messageId, preferSteer) =>
@@ -79,6 +94,9 @@ export class Broker {
     this.deliverClaude =
       dependencies.deliverClaude ??
       ((peer, payload) => this.claudeTransport.send(peer, payload));
+    this.deliverMuse =
+      dependencies.deliverMuse ??
+      ((peer, payload, messageId) => this.museTransport.send(peer, payload, messageId));
     this.store.pruneDelivered();
     this.wake();
   }
@@ -145,6 +163,7 @@ export class Broker {
     await Promise.all(this.deliveryTails.values());
     this.codexTransport.close();
     await this.claudeTransport.close();
+    await this.museTransport.close();
     this.store.close();
   }
 
@@ -157,6 +176,8 @@ export class Broker {
       this.discoveryAt = Date.now();
       this.claudePeers = live.filter((peer) => peer.provider === "claude");
       this.claudeDiscoveryAt = this.discoveryAt;
+      this.musePeers = live.filter((peer) => peer.provider === "muse");
+      this.museDiscoveryAt = this.discoveryAt;
       return live;
     });
     try {
@@ -179,6 +200,22 @@ export class Broker {
       return await this.discoveringClaude;
     } finally {
       this.discoveringClaude = undefined;
+    }
+  }
+
+  private async refreshMusePeers(): Promise<Peer[]> {
+    if (Date.now() - this.museDiscoveryAt < 1_000) return this.musePeers;
+    if (this.discoveringMuse) return await this.discoveringMuse;
+    this.discoveringMuse = this.discoverMuse().then((live) => {
+      this.store.upsertPeers(live);
+      this.musePeers = live;
+      this.museDiscoveryAt = Date.now();
+      return live;
+    });
+    try {
+      return await this.discoveringMuse;
+    } finally {
+      this.discoveringMuse = undefined;
     }
   }
 
@@ -221,6 +258,13 @@ export class Broker {
           throw new OrcodeError("PEER_OFFLINE", `${envelope.to} is not currently reachable.`);
         }
         await this.deliverClaude(peer, serializeEnvelope(envelope));
+      } else if (peer.provider === "muse") {
+        const live = await this.refreshMusePeers();
+        peer = live.find((candidate) => candidate.address === envelope.to);
+        if (!peer) {
+          throw new OrcodeError("PEER_OFFLINE", `${envelope.to} is not currently reachable.`);
+        }
+        await this.deliverMuse(peer, serializeEnvelope(envelope), envelope.id);
       } else {
         await this.deliverCodex(
           peer,

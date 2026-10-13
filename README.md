@@ -1,13 +1,13 @@
 # Orcode
 
-Orcode gives ordinary Codex CLI and Claude Code CLI sessions a durable, local
-way to discover and message each other. No launch wrapper or `--name` flag is
-required.
+Orcode gives ordinary Codex CLI, Claude Code CLI, and Muse sessions
+a durable, local way to discover and message each other. No launch wrapper or
+`--name` flag is required.
 
 ```text
 Codex MCP ─┐                         ┌─ Codex turn steer / thread queue
-           ├─ Orcode broker + SQLite ┤
-Claude MCP ┘                         └─ Claude native SendMessage queue
+Claude MCP ┼─ Orcode broker + SQLite ┼─ Claude native SendMessage queue
+Muse MCP ─┘                         └─ Muse one-shot scheduled prompt
 ```
 
 The broker writes a message before attempting delivery and retries transient
@@ -22,6 +22,7 @@ are readable Markdown rather than JSON.
 - Node.js 24 or newer
 - Codex CLI 0.162.1 or newer
 - Claude Code CLI 2.1.163 or newer
+- Muse 1.4.7 or newer
 
 These minimum CLI versions provide the session identity and native queue APIs
 that Orcode relies on. Run `orcode doctor` to check the installed versions.
@@ -36,12 +37,12 @@ npm link
 orcode setup
 ```
 
-`orcode setup` adds a user-level MCP server named `orcode` to both CLIs and
+`orcode setup` adds a user-level MCP server named `orcode` to all three CLIs and
 starts the local broker. It refuses to overwrite an unrelated MCP entry with
 the same name; use `orcode setup --force` only when replacement is intended.
 
-Restart any Codex or Claude sessions that were already open. From then on,
-launch both programs normally in the same repository:
+Restart any Codex, Claude, or Muse sessions that were already open. From
+then on, launch all three programs normally in the same repository:
 
 ```sh
 codex
@@ -51,12 +52,16 @@ codex
 claude
 ```
 
+```sh
+muse
+```
+
 There is no `orcode codex` or `orcode claude` wrapper. Peer names come from the
 native sessions and are only convenient aliases; routing and replies use
-stable addresses such as `codex:<thread-uuid>` and
-`claude:<session-uuid>`.
+stable addresses such as `codex:<thread-uuid>`,
+`claude:<session-uuid>`, and `muse:<session-uuid>`.
 
-To remove both MCP entries:
+To remove all three MCP entries:
 
 ```sh
 orcode uninstall
@@ -64,7 +69,7 @@ orcode uninstall
 
 ## Try a conversation
 
-With Codex and Claude open in the same repository, give Codex this prompt:
+With any two of the CLIs open in the same repository, give one of them a prompt like this (shown for Codex):
 
 ```text
 Use Orcode to list the available Claude peers. Send the reachable Claude peer
@@ -83,7 +88,7 @@ broker with `orcode status`.
 
 ## MCP tools
 
-Orcode exposes four tools to both agents:
+Orcode exposes four tools to all three agents:
 
 - `list_peers({ allProjects? })` lists currently reachable sessions of the
   other provider. By default it stays within the current Git project.
@@ -103,7 +108,8 @@ Message states have precise meanings:
 
 - `queued`: safely stored locally; delivery is being retried.
 - `delivering`: one native delivery attempt is in progress.
-- `delivered`: Codex or Claude accepted the message into its native queue.
+- `delivered`: the provider accepted the message into its native queue
+  (for Muse, its per-session scheduler).
 - `acknowledged`: the receiving session explicitly began processing it.
 - `replied`: the receiving session sent a correlated reply.
 - `cancelled`: a still-pending message was cancelled.
@@ -134,8 +140,17 @@ database is mode `0600`. Completed records are retained for seven days.
 
 If the broker is absent, the next MCP request starts it. If it exits during a
 delivery, that message returns to `queued` on restart and is retried. Claude
-targets are resolved from fresh native discovery, while Codex messages use the
-shared app-server's thread queue and a stable thread UUID.
+and Muse targets are resolved from fresh native discovery, while Codex
+messages use the shared app-server's thread queue and a stable thread UUID.
+
+Muse has no native external message ingress, so delivery to a Muse
+session inserts a one-shot job into that session's own scheduler database
+(`cron.db`); the session fires it as a scheduled prompt, which also wakes an
+idle session. The message therefore arrives labeled as a scheduled task
+rather than as a native peer message. Muse sessions are discovered from
+Muse's local runtime registry, and a session whose host process is gone is
+treated as offline. Sending from Muse uses the same MCP tools as the other
+providers.
 
 ## Plugin bundles
 

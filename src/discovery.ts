@@ -1,6 +1,9 @@
+import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { identifyProject } from "./project.ts";
 import { runProcess } from "./process.ts";
 import { codexDaemonInfo, CodexAppServerClient } from "./transports/codex.ts";
+import { museDataRoot } from "./transports/muse.ts";
 import type { Peer } from "./types.ts";
 
 type UnknownRecord = Record<string, unknown>;
@@ -111,10 +114,157 @@ export async function discoverNativeCodexPeers(): Promise<Peer[]> {
   }
 }
 
+interface MuseLogFacts {
+  cwd?: string;
+  name?: string;
+  pid?: number;
+}
+
+function walkRecords(value: unknown, visit: (record: UnknownRecord) => void): void {
+  if (Array.isArray(value)) {
+    for (const item of value) walkRecords(item, visit);
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  const record = value as UnknownRecord;
+  visit(record);
+  for (const item of Object.values(record)) {
+    if (typeof item === "string" && item.startsWith("{")) {
+      try {
+        walkRecords(JSON.parse(item) as unknown, visit);
+      } catch {
+        // Not a nested record.
+      }
+    } else {
+      walkRecords(item, visit);
+    }
+  }
+}
+
+function museLogFacts(logPath: string): MuseLogFacts {
+  const facts: MuseLogFacts = {};
+  let fd: number | undefined;
+  try {
+    fd = openSync(logPath, "r");
+    const buffer = Buffer.alloc(512 * 1024);
+    const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
+    const text = buffer.subarray(0, bytesRead).toString("utf8");
+    for (const line of text.split("\n")) {
+      if (!line) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line) as unknown;
+      } catch {
+        continue;
+      }
+      walkRecords(parsed, (record) => {
+        const payload = record.payload as UnknownRecord | undefined;
+        if (!payload || typeof payload !== "object") return;
+        if (record.payload_type === "session.name.changed") {
+          if (typeof payload.new_name === "string" && payload.new_name !== "") {
+            facts.name = payload.new_name;
+          }
+          return;
+        }
+        const inner = payload.record as UnknownRecord | undefined;
+        if (!inner || typeof inner !== "object") return;
+        if (record.payload_type === "runtime.session.metadata") {
+          if (typeof inner.workspace_root === "string" && inner.workspace_root !== "") {
+            facts.cwd ??= inner.workspace_root;
+          }
+        }
+        if (record.payload_type === "runtime.session.route_facts") {
+          if (typeof inner.cwd === "string" && inner.cwd !== "") facts.cwd ??= inner.cwd;
+          if (typeof inner.pid === "number") facts.pid ??= inner.pid;
+        }
+      });
+      if (facts.cwd && facts.name) break;
+    }
+  } catch {
+    // Facts stay partial; the caller skips peers without a workspace.
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+  return facts;
+}
+
+function findMuseLogPath(dataRoot: string, sessionId: string): string | undefined {
+  const sessionsRoot = join(dataRoot, "sessions");
+  const list = (path: string): string[] => {
+    try {
+      return readdirSync(path, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name);
+    } catch {
+      return [];
+    }
+  };
+  for (const year of list(sessionsRoot)) {
+    for (const month of list(join(sessionsRoot, year))) {
+      for (const day of list(join(sessionsRoot, year, month))) {
+        const candidate = join(sessionsRoot, year, month, day, sessionId, "session.jsonl");
+        if (existsSync(candidate)) return candidate;
+      }
+    }
+  }
+  return undefined;
+}
+
+export async function discoverNativeMusePeers(): Promise<Peer[]> {
+  const dataRoot = museDataRoot();
+  const registryDir = join(dataRoot, "runtime", "muse", "sessions");
+  let entries: string[];
+  try {
+    entries = readdirSync(registryDir).filter((entry) => entry.endsWith(".json"));
+  } catch {
+    return [];
+  }
+  const peers: Peer[] = [];
+  for (const entry of entries) {
+    try {
+      const registered = JSON.parse(
+        readFileSync(join(registryDir, entry), "utf8"),
+      ) as UnknownRecord;
+      const sessionId = stringField(registered, ["session_id"]);
+      const endpoint = stringField(registered, ["endpoint_hint"]);
+      if (!sessionId || !endpoint) continue;
+      if (registered.target_eligibility !== "message_capable") continue;
+      if (!existsSync(join(dataRoot, "runtime", "muse", endpoint))) continue;
+      const logPath = findMuseLogPath(dataRoot, sessionId);
+      if (!logPath) continue;
+      const facts = museLogFacts(logPath);
+      if (!facts.cwd) continue;
+      const project = identifyProject(facts.cwd);
+      const hintPid = /pid=(\d+)/u.exec(
+        stringField(registered, ["process_generation_hint"]) ?? "",
+      )?.[1];
+      const pid = facts.pid ?? (hintPid ? Number(hintPid) : undefined);
+      peers.push({
+        provider: "muse",
+        sessionId,
+        name: facts.name ?? `Muse ${sessionId.slice(0, 8)}`,
+        address: `muse:${sessionId}`,
+        cwd: facts.cwd,
+        projectId: project.id,
+        projectRoot: project.root,
+        status: "reachable",
+        nativeTarget: join(logPath, "..", "cron.db"),
+        ...(pid === undefined ? {} : { hostPid: pid }),
+      });
+    } catch {
+      continue;
+    }
+  }
+  return peers.sort((left, right) => left.address.localeCompare(right.address));
+}
+
 export async function discoverAllNativePeers(): Promise<Peer[]> {
-  const [codex, claude] = await Promise.all([
+  const [codex, claude, muse] = await Promise.all([
     discoverNativeCodexPeers(),
     discoverNativeClaudePeers(),
+    discoverNativeMusePeers(),
   ]);
-  return [...codex, ...claude].sort((left, right) => left.address.localeCompare(right.address));
+  return [...codex, ...claude, ...muse].sort((left, right) =>
+    left.address.localeCompare(right.address),
+  );
 }

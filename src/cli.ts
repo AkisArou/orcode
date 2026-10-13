@@ -9,10 +9,10 @@ import { setup, uninstall } from "./setup.ts";
 import type { Provider } from "./types.ts";
 
 const VERSION = "0.2.0";
-const HELP = `orcode - durable Codex CLI <-> Claude Code CLI messaging
+const HELP = `orcode - durable messaging between Codex, Claude Code, and Muse sessions
 
 Setup:
-  orcode setup [--force]     Configure both CLIs once
+  orcode setup [--force]     Configure all three CLIs once
   orcode uninstall           Remove Orcode MCP configuration
   orcode doctor              Verify versions, configuration, and broker
 
@@ -21,19 +21,20 @@ Diagnostics:
   orcode status
   orcode cancel <message-id>
 
-After setup, launch Codex and Claude normally. No Orcode name is required:
+After setup, launch each CLI normally. No Orcode name is required:
   codex
   claude
+  muse
 
 Internal:
-  orcode mcp --host codex|claude
+  orcode mcp --host codex|claude|muse
   orcode daemon run|stop`;
 
 function hostOption(args: string[]): Provider {
   const index = args.indexOf("--host");
   const host = index < 0 ? undefined : args[index + 1];
-  if (host !== "codex" && host !== "claude") {
-    throw new OrcodeError("INVALID_ARGUMENT", "--host must be codex or claude.");
+  if (host !== "codex" && host !== "claude" && host !== "muse") {
+    throw new OrcodeError("INVALID_ARGUMENT", "--host must be codex, claude, or muse.");
   }
   return host;
 }
@@ -51,7 +52,7 @@ async function main(args = process.argv.slice(2)): Promise<number> {
       }
       await stopBroker();
       await ensureBroker();
-      process.stdout.write("Done. Restart open Codex and Claude sessions, then launch them normally.\n");
+      process.stdout.write("Done. Restart open Codex, Claude, and Muse sessions, then launch them normally.\n");
       return 0;
     }
     case "uninstall": {
@@ -63,6 +64,7 @@ async function main(args = process.argv.slice(2)): Promise<number> {
     }
     case "codex":
     case "claude":
+    case "muse":
       throw new OrcodeError(
         "INVALID_ARGUMENT",
         `The orcode ${command} wrapper was removed. Run 'orcode setup' once, then launch '${command}' directly.`,

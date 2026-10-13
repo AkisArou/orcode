@@ -1,10 +1,57 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join } from "node:path";
 import { OrcodeError } from "./errors.ts";
 import { runProcess } from "./process.ts";
 
 export interface SetupResult {
-  host: "codex" | "claude";
+  host: "codex" | "claude" | "muse";
   action: "installed" | "already-configured" | "removed" | "not-configured";
   detail: string;
+}
+
+type MuseSettings = Record<string, unknown> & {
+  mcpServers?: Record<string, Record<string, unknown>>;
+};
+
+export function museSettingsPath(environment: NodeJS.ProcessEnv = process.env): string {
+  if (environment.ORCODE_MUSE_SETTINGS && isAbsolute(environment.ORCODE_MUSE_SETTINGS)) {
+    return environment.ORCODE_MUSE_SETTINGS;
+  }
+  const configHome =
+    environment.XDG_CONFIG_HOME && isAbsolute(environment.XDG_CONFIG_HOME)
+      ? environment.XDG_CONFIG_HOME
+      : join(homedir(), ".config");
+  return join(configHome, "muse", "settings.json");
+}
+
+function readMuseSettings(): MuseSettings | undefined {
+  const path = museSettingsPath();
+  if (!existsSync(path)) return undefined;
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as MuseSettings;
+  } catch {
+    throw new OrcodeError(
+      "SETUP_CONFLICT",
+      `Muse settings at ${path} are not valid JSON; fix them before running setup.`,
+    );
+  }
+}
+
+function writeMuseSettings(settings: MuseSettings): void {
+  const path = museSettingsPath();
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  writeFileSync(path, `${JSON.stringify(settings, null, 2)}\n`);
+}
+
+function museConfiguration(): Record<string, unknown> | undefined {
+  return readMuseSettings()?.mcpServers?.orcode;
+}
+
+function isOrcodeMuseEntry(entry: Record<string, unknown> | undefined): boolean {
+  if (!entry) return false;
+  const text = JSON.stringify(entry);
+  return text.includes("orcode") && text.includes("muse");
 }
 
 function commandName(): string {
@@ -84,6 +131,13 @@ export async function setup(force = false): Promise<SetupResult[]> {
       "Claude already has an MCP server named orcode that Orcode does not own. Re-run with --force to replace it.",
     );
   }
+  const existingMuseEntry = museConfiguration();
+  if (existingMuseEntry !== undefined && !isOrcodeMuseEntry(existingMuseEntry) && !force) {
+    throw new OrcodeError(
+      "SETUP_CONFLICT",
+      "Muse already has an MCP server named orcode that Orcode does not own. Re-run with --force to replace it.",
+    );
+  }
 
   if (codexConfig !== undefined) {
     if (isOrcodeConfiguration(codexConfig, "codex") && !force) {
@@ -141,6 +195,30 @@ export async function setup(force = false): Promise<SetupResult[]> {
     }
     results.push({ host: "claude", action: "installed", detail: "user MCP entry" });
   }
+
+  const museEntry = museConfiguration();
+  if (museEntry !== undefined && !isOrcodeMuseEntry(museEntry) && !force) {
+    throw new OrcodeError(
+      "SETUP_CONFLICT",
+      "Muse already has an MCP server named orcode that Orcode does not own. Re-run with --force to replace it.",
+    );
+  }
+  if (museEntry !== undefined && isOrcodeMuseEntry(museEntry) && !force) {
+    results.push({ host: "muse", action: "already-configured", detail: "user MCP entry" });
+  } else {
+    const settings = readMuseSettings() ?? { schema_version: 1 };
+    settings.mcpServers = {
+      ...settings.mcpServers,
+      orcode: {
+        type: "stdio",
+        command,
+        args: ["mcp", "--host", "muse"],
+        mode: "optional",
+      },
+    };
+    writeMuseSettings(settings);
+    results.push({ host: "muse", action: "installed", detail: "user MCP entry" });
+  }
   return results;
 }
 
@@ -171,13 +249,33 @@ export async function uninstall(): Promise<SetupResult[]> {
     await removeClaude();
     results.push({ host: "claude", action: "removed", detail: "user MCP entry" });
   }
+
+  const museEntry = museConfiguration();
+  if (museEntry === undefined) {
+    results.push({ host: "muse", action: "not-configured", detail: "no MCP entry" });
+  } else if (!isOrcodeMuseEntry(museEntry)) {
+    throw new OrcodeError(
+      "SETUP_CONFLICT",
+      "Refusing to remove the Muse MCP server named orcode because Orcode does not own it.",
+    );
+  } else {
+    const settings = readMuseSettings() as MuseSettings;
+    if (settings.mcpServers) delete settings.mcpServers.orcode;
+    writeMuseSettings(settings);
+    results.push({ host: "muse", action: "removed", detail: "user MCP entry" });
+  }
   return results;
 }
 
-export async function configuredHosts(): Promise<{ codex: boolean; claude: boolean }> {
+export async function configuredHosts(): Promise<{
+  codex: boolean;
+  claude: boolean;
+  muse: boolean;
+}> {
   const [codex, claude] = await Promise.all([codexConfiguration(), claudeConfiguration()]);
   return {
     codex: codex !== undefined && isOrcodeConfiguration(codex, "codex"),
     claude: claude !== undefined && isOrcodeConfiguration(claude, "claude"),
+    muse: isOrcodeMuseEntry(museConfiguration()),
   };
 }

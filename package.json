@@ -1,7 +1,7 @@
 {
   "name": "orcode",
   "version": "0.2.0",
-  "description": "Durable local messaging between Codex CLI and Claude Code CLI sessions",
+  "description": "Durable local messaging between Codex, Claude Code, and Muse sessions",
   "type": "module",
   "bin": {
     "orcode": "src/cli.ts"
@@ -28,6 +28,7 @@
   "keywords": [
     "codex",
     "claude-code",
+    "muse",
     "mcp",
     "agents",
     "cli"

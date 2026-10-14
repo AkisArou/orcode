@@ -21,6 +21,7 @@ type TurnListResponse = {
 };
 
 export interface CodexDeliveryOptions {
+  /** Try active-turn steering by default; false explicitly requests queueing. */
   preferSteer?: boolean;
 }
 
@@ -221,7 +222,7 @@ export class CodexTransport {
     const send = async () => {
       const client = await this.clientForDaemon();
       if (
-        options.preferSteer === true &&
+        options.preferSteer !== false &&
         (await this.trySteer(client, threadId, payload, messageId))
       ) {
         return;
@@ -251,33 +252,39 @@ export class CodexTransport {
     payload: string,
     messageId: string,
   ): Promise<boolean> {
-    let turnId: string | undefined;
-    try {
-      const turns = await client.request("thread/turns/list", {
-        threadId,
-        limit: 1,
-        sortDirection: "desc",
-        itemsView: "notLoaded",
-      });
-      turnId = inProgressTurnId(turns);
-    } catch (error) {
-      if (isProtocolRejection(error)) return false;
-      throw error;
-    }
-    if (!turnId) return false;
+    let rejectedTurnId: string | undefined;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let turnId: string | undefined;
+      try {
+        const turns = await client.request("thread/turns/list", {
+          threadId,
+          limit: 1,
+          sortDirection: "desc",
+          itemsView: "notLoaded",
+        });
+        turnId = inProgressTurnId(turns);
+      } catch (error) {
+        if (isProtocolRejection(error)) return false;
+        throw error;
+      }
+      if (!turnId || turnId === rejectedTurnId) return false;
 
-    try {
-      await client.request("turn/steer", {
-        threadId,
-        expectedTurnId: turnId,
-        input: [{ type: "text", text: payload, textElements: [] }],
-        clientUserMessageId: messageId,
-      });
-      return true;
-    } catch (error) {
-      if (isProtocolRejection(error)) return false;
-      throw error;
+      try {
+        await client.request("turn/steer", {
+          threadId,
+          expectedTurnId: turnId,
+          input: [{ type: "text", text: payload, textElements: [] }],
+          clientUserMessageId: messageId,
+        });
+        return true;
+      } catch (error) {
+        if (!isProtocolRejection(error)) throw error;
+        // A new turn may have started between listing and steering. Recheck
+        // once so a rollover doesn't defer the message for another full turn.
+        rejectedTurnId = turnId;
+      }
     }
+    return false;
   }
 
   close(): void {

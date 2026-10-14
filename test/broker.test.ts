@@ -191,7 +191,7 @@ describe("durable broker", () => {
     }
   });
 
-  it("makes only correlated replies eligible for Codex steering", async () => {
+  it("makes both replies and new messages eligible for Codex steering", async () => {
     const deliverCodex = mock.fn(
       async (
         _peer: Peer,
@@ -223,7 +223,7 @@ describe("durable broker", () => {
 
       assert.equal(deliverCodex.mock.callCount(), 2);
       assert.equal(deliverCodex.mock.calls[0]?.arguments[3], true);
-      assert.equal(deliverCodex.mock.calls[1]?.arguments[3], false);
+      assert.equal(deliverCodex.mock.calls[1]?.arguments[3], true);
     } finally {
       await broker.close();
     }

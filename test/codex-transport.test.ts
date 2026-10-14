@@ -99,7 +99,7 @@ describe("Codex app-server transport", () => {
     );
   });
 
-  it("steers a correlated reply into the active turn", async () => {
+  it("steers a new message into the active turn by default", async () => {
     await withAppServer(
       (request) => {
         if (request.method === "thread/turns/list") {
@@ -114,7 +114,7 @@ describe("Codex app-server transport", () => {
       },
       async (client, socketPath, messages) => {
         const transport = transportWithClient(client, socketPath);
-        await transport.send(peer, "reply", "message-2", { preferSteer: true });
+        await transport.send(peer, "new message", "message-2");
 
         assert.deepEqual(messages.map((message) => message.method), [
           "initialize",
@@ -125,14 +125,14 @@ describe("Codex app-server transport", () => {
         assert.deepEqual(messages[3]?.params, {
           threadId: "thread-1",
           expectedTurnId: "turn-1",
-          input: [{ type: "text", text: "reply", textElements: [] }],
+          input: [{ type: "text", text: "new message", textElements: [] }],
           clientUserMessageId: "message-2",
         });
       },
     );
   });
 
-  it("falls back to the durable queue when the active turn rejects steering", async () => {
+  it("falls back to the durable queue when the same active turn rejects steering", async () => {
     await withAppServer(
       (request) => {
         if (request.method === "thread/turns/list") {
@@ -156,9 +156,130 @@ describe("Codex app-server transport", () => {
           "initialized",
           "thread/turns/list",
           "turn/steer",
+          "thread/turns/list",
           "thread/queue/add",
         ]);
-        assert.equal(messages[4]?.params?.clientUserMessageId, "message-3");
+        assert.deepEqual(messages[5]?.params, {
+          threadId: "thread-1",
+          input: [{ type: "text", text: "reply", textElements: [] }],
+          clientUserMessageId: "message-3",
+        });
+      },
+    );
+  });
+
+  it("queues messages when the latest turn has finished", async () => {
+    await withAppServer(
+      (request) => ({
+        result: request.method === "thread/turns/list"
+          ? { data: [{ id: "turn-1", status: "completed" }] }
+          : {},
+      }),
+      async (client, socketPath, messages) => {
+        await transportWithClient(client, socketPath).send(peer, "hello", "idle-message");
+        assert.deepEqual(messages.map((message) => message.method), [
+          "initialize",
+          "initialized",
+          "thread/turns/list",
+          "thread/queue/add",
+        ]);
+        assert.equal(messages[3]?.params?.clientUserMessageId, "idle-message");
+      },
+    );
+  });
+
+  it("queues messages when turn discovery is unsupported", async () => {
+    await withAppServer(
+      (request) => request.method === "thread/turns/list"
+        ? { error: { code: -32601, message: "method not found" } }
+        : { result: {} },
+      async (client, socketPath, messages) => {
+        await transportWithClient(client, socketPath).send(peer, "hello", "unsupported-message");
+        assert.deepEqual(messages.map((message) => message.method), [
+          "initialize",
+          "initialized",
+          "thread/turns/list",
+          "thread/queue/add",
+        ]);
+        assert.equal(messages[3]?.params?.clientUserMessageId, "unsupported-message");
+      },
+    );
+  });
+
+  it("steers into the replacement turn after a rollover", async () => {
+    let listedTurns = 0;
+    await withAppServer(
+      (request) => {
+        if (request.method === "thread/turns/list") {
+          listedTurns++;
+          return { result: { data: [{ id: `turn-${listedTurns}`, status: "inProgress" }] } };
+        }
+        if (request.method === "turn/steer" && request.params?.expectedTurnId === "turn-1") {
+          return { error: { code: -32600, message: "active turn changed" } };
+        }
+        return { result: {} };
+      },
+      async (client, socketPath, messages) => {
+        await transportWithClient(client, socketPath).send(peer, "hello", "rollover-message");
+        assert.deepEqual(messages.map((message) => message.method), [
+          "initialize",
+          "initialized",
+          "thread/turns/list",
+          "turn/steer",
+          "thread/turns/list",
+          "turn/steer",
+        ]);
+        assert.equal(messages[3]?.params?.expectedTurnId, "turn-1");
+        assert.equal(messages[5]?.params?.expectedTurnId, "turn-2");
+        assert.equal(messages[3]?.params?.clientUserMessageId, "rollover-message");
+        assert.equal(messages[5]?.params?.clientUserMessageId, "rollover-message");
+        assert.deepEqual(messages[5]?.params?.input, messages[3]?.params?.input);
+      },
+    );
+  });
+
+  it("bounds steering retries when turns keep changing", async () => {
+    let listedTurns = 0;
+    await withAppServer(
+      (request) => {
+        if (request.method === "thread/turns/list") {
+          listedTurns++;
+          return { result: { data: [{ id: `turn-${listedTurns}`, status: "inProgress" }] } };
+        }
+        if (request.method === "turn/steer") {
+          return { error: { code: -32600, message: "active turn changed" } };
+        }
+        return { result: {} };
+      },
+      async (client, socketPath, messages) => {
+        await transportWithClient(client, socketPath).send(peer, "hello", "racing-message");
+        assert.deepEqual(messages.map((message) => message.method), [
+          "initialize",
+          "initialized",
+          "thread/turns/list",
+          "turn/steer",
+          "thread/turns/list",
+          "turn/steer",
+          "thread/queue/add",
+        ]);
+        assert.equal(messages[6]?.params?.clientUserMessageId, "racing-message");
+      },
+    );
+  });
+
+  it("honors an explicit queue-only transport request", async () => {
+    await withAppServer(
+      () => ({ result: {} }),
+      async (client, socketPath, messages) => {
+        await transportWithClient(client, socketPath).send(peer, "hello", "queue-message", {
+          preferSteer: false,
+        });
+        assert.deepEqual(messages.map((message) => message.method), [
+          "initialize",
+          "initialized",
+          "thread/queue/add",
+        ]);
+        assert.equal(messages[2]?.params?.clientUserMessageId, "queue-message");
       },
     );
   });

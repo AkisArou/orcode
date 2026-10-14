@@ -270,7 +270,7 @@ export class Broker {
           peer,
           serializeEnvelope(envelope),
           envelope.id,
-          envelope.replyTo !== undefined,
+          true,
         );
       }
       this.store.markDelivered(messageId);

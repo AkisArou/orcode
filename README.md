@@ -11,10 +11,10 @@ Muse MCP ─┘                         └─ Muse one-shot scheduled prompt
 ```
 
 The broker writes a message before attempting delivery and retries transient
-failures in the background. Claude messages use its native queue. A correlated
-reply to a busy Codex session is steered into its active turn; new messages and
-steering races use Codex's thread queue. Messages shown in the agent transcript
-are readable Markdown rather than JSON.
+failures in the background. Claude messages use its native queue. Messages to a
+busy Codex session try steering into its active turn; idle sessions and
+unavailable steering use Codex's thread queue. Messages shown in the agent
+transcript are readable Markdown rather than JSON.
 
 ## Requirements
 
@@ -80,8 +80,8 @@ delivery status. Wait for Claude's reply before summarizing it.
 
 The outbound call returns immediately after native delivery, or as `queued` if
 the peer is temporarily unavailable. Claude sees a Markdown message in its own
-session. Its reply is placed in Codex's native queue and appears in the Codex
-transcript even if Codex was busy when Claude sent it.
+session. Its reply is steered into Codex's active turn when possible, or placed
+in Codex's native queue, and appears in the Codex transcript.
 
 You can inspect native peers from a shell with `orcode peers` and check the
 broker with `orcode status`.
@@ -108,8 +108,8 @@ Message states have precise meanings:
 
 - `queued`: safely stored locally; delivery is being retried.
 - `delivering`: one native delivery attempt is in progress.
-- `delivered`: the provider accepted the message into its native queue
-  (for Muse, its per-session scheduler).
+- `delivered`: the provider accepted the message through active-turn steering
+  or its native queue (for Muse, its per-session scheduler).
 - `acknowledged`: the receiving session explicitly began processing it.
 - `replied`: the receiving session sent a correlated reply.
 - `cancelled`: a still-pending message was cancelled.
@@ -121,11 +121,14 @@ produce a duplicate; message IDs let the receiver recognize it. `delivered`
 does not claim that the model read the message—use `acknowledged` or `replied`
 when that distinction matters.
 
-For Codex, only correlated replies with a `replyTo` value are eligible for
-mid-turn steering. Orcode first verifies that the newest turn is still in
-progress. If the turn ends, rejects steering, or cannot be steered, the same
-durable message falls back to the thread queue. New requests never steer or
-interrupt active work.
+For Codex, both new messages and correlated replies try mid-turn steering,
+using the same `turn/steer` API that adds user input to a running turn. Orcode
+first verifies that the newest turn is still in progress. If the active turn
+changes during delivery, Orcode rechecks once and tries the new turn. If the
+session is idle or steering remains unavailable, the same durable message
+falls back to the thread queue. Steering can reach Codex during ongoing work,
+but acceptance does not guarantee immediate processing; use `acknowledged`
+or `replied` to confirm receipt by the agent.
 
 Messages are limited to 64 KiB of UTF-8 text. Orcode supports one-to-one local
 messages, not attachments, broadcast, or remote transport.
@@ -141,7 +144,8 @@ database is mode `0600`. Completed records are retained for seven days.
 If the broker is absent, the next MCP request starts it. If it exits during a
 delivery, that message returns to `queued` on restart and is retried. Claude
 and Muse targets are resolved from fresh native discovery, while Codex
-messages use the shared app-server's thread queue and a stable thread UUID.
+messages use the shared app-server's active-turn steering or thread queue and
+a stable thread UUID.
 
 Muse has no native external message ingress, so delivery to a Muse
 session inserts a one-shot job into that session's own scheduler database

@@ -26,6 +26,10 @@ transcript are readable Markdown rather than JSON.
 
 These minimum CLI versions provide the session identity and native queue APIs
 that Orcode relies on. Run `orcode doctor` to check the installed versions.
+Codex sessions must connect to the shared app-server daemon. If it is not
+running, start it with `codex app-server daemon start`, then connect your Codex
+sessions to it. Standalone sessions launched with `--no-daemon` are not
+reachable through that daemon.
 
 ## Install and configure
 
@@ -86,12 +90,23 @@ in Codex's native queue, and appears in the Codex transcript.
 You can inspect native peers from a shell with `orcode peers` and check the
 broker with `orcode status`.
 
+Opening another session does not require restarting Orcode. Peer lists and
+send requests refresh native discovery, and sessions using the same provider
+can message each other. Codex discovery reads loaded sessions directly,
+including sessions that have not saved a conversation yet. Claude delivery
+refreshes its native recipient references, and Muse discovery follows log
+updates and checks that the registered host process is still alive.
+
+If Codex sessions are missing, run `orcode doctor`; it checks the shared daemon
+connection as well as CLI versions and MCP configuration.
+
 ## MCP tools
 
 Orcode exposes four tools to all three agents:
 
-- `list_peers({ allProjects? })` lists currently reachable sessions of the
-  other provider. By default it stays within the current Git project.
+- `list_peers({ allProjects? })` discovers currently reachable Codex, Claude,
+  and Muse sessions, including peers using the same provider, and excludes the
+  calling session. By default it stays within the current Git project.
 - `send_message({ to, message, replyTo? })` durably stores and immediately
   attempts one delivery. Use an exact address when available.
 - `message_status({ messageId })` reports the durable delivery state.

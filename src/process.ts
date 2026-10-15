@@ -7,6 +7,16 @@ export interface ProcessResult {
   exitCode: number;
 }
 
+export function processIsAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 export function cleanEnvironment(
   additions: Record<string, string> = {},
 ): Record<string, string> {

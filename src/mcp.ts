@@ -60,7 +60,7 @@ export async function runMcpServer(host: Provider): Promise<void> {
     {
       title: "List Orcode peers",
       description:
-        "List reachable sessions of the other provider. Canonical addresses remain stable across renames and resumes.",
+        "Discover currently reachable Codex, Claude, and Muse sessions, excluding this session. Peers using the same provider are included. Canonical addresses remain stable across renames and resumes.",
       inputSchema: {
         allProjects: z.boolean().optional().describe("Include live peers from other projects."),
       },

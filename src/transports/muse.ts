@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { OrcodeError } from "../errors.ts";
+import { processIsAlive } from "../process.ts";
 import type { Peer } from "../types.ts";
 
 export function museDataRoot(environment: NodeJS.ProcessEnv = process.env): string {
@@ -17,6 +18,9 @@ export function museDataRoot(environment: NodeJS.ProcessEnv = process.env): stri
 
 export class MuseTransport {
   async send(peer: Peer, payload: string, messageId: string): Promise<void> {
+    if (peer.hostPid === undefined || !processIsAlive(peer.hostPid)) {
+      throw new OrcodeError("PEER_OFFLINE", `Muse session ${peer.address} has no live host process.`);
+    }
     const databasePath = peer.nativeTarget;
     if (!existsSync(databasePath)) {
       throw new OrcodeError(

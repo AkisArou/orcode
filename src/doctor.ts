@@ -1,6 +1,6 @@
 import { accessSync, chmodSync, constants, mkdirSync, statSync } from "node:fs";
 import { ensureBroker } from "./broker.ts";
-import { discoverNativeMusePeers } from "./discovery.ts";
+import { discoverNativeCodexPeers, discoverNativeMusePeers } from "./discovery.ts";
 import { commandVersion, runProcess } from "./process.ts";
 import { ensureRuntimeRoot } from "./runtime.ts";
 import { configuredHosts } from "./setup.ts";
@@ -104,6 +104,23 @@ export async function doctor(): Promise<DoctorCheck[]> {
       ok: false,
       detail: error instanceof Error ? error.message : String(error),
     });
+  }
+
+  if (codexVersion) {
+    try {
+      const peers = await discoverNativeCodexPeers({ strict: true });
+      checks.push({
+        name: "Codex session discovery",
+        ok: true,
+        detail: `${peers.length} loaded Codex session${peers.length === 1 ? "" : "s"} found`,
+      });
+    } catch (error) {
+      checks.push({
+        name: "Codex session discovery",
+        ok: false,
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   if (claudeVersion) {

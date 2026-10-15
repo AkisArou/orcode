@@ -52,6 +52,15 @@ export class ClaudeTransport {
   async send(peer: Peer, payload: string): Promise<void> {
     const invoke = async () => {
       const client = await this.connectedClient();
+      // Claude resolves session references against its native recipient listing.
+      // Refresh it on this connection so later sessions and renames are visible.
+      const listing = await client.callTool({ name: "ListAgents", arguments: {} });
+      if (listing.isError) {
+        throw new OrcodeError(
+          "PROVIDER_UNAVAILABLE",
+          `Claude Code could not refresh recipients: ${toolErrorText(listing) ?? "unknown error"}`,
+        );
+      }
       const result = await client.callTool({
         name: "SendMessage",
         arguments: {

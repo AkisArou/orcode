@@ -53,6 +53,92 @@ afterEach(() => {
 });
 
 describe("durable broker", () => {
+  it("can message another session that shares the caller's display name", async () => {
+    const other: Peer = {
+      ...codex, sessionId: "second-codex", address: "codex:second-codex",
+      threadId: "second-codex", nativeTarget: "second-codex",
+    };
+    const broker = new Broker({
+      store: store(), discover: async () => [codex, other],
+      deliverCodex: async () => undefined,
+    });
+    try {
+      const sent = await broker.send(self, other.name, "Same display name, different session.");
+      assert.equal(sent.to, other.address);
+      assert.equal(sent.state, "delivered");
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("discovers and messages a second Codex opened after an initial conversation", async (context) => {
+    context.mock.timers.enable({ apis: ["Date"], now: 1_800_000_000_000 });
+    const secondCodex: Peer = {
+      ...codex,
+      sessionId: "second-codex",
+      threadId: "second-codex",
+      address: "codex:second-codex",
+      name: "Second Codex",
+      nativeTarget: "second-codex",
+    };
+    const live = [codex, claude];
+    const delivered: string[] = [];
+    const broker = new Broker({
+      store: store(),
+      discover: async () => [...live],
+      discoverClaude: async () => [claude],
+      deliverClaude: async () => undefined,
+      deliverCodex: async peer => { delivered.push(peer.address); },
+    });
+    try {
+      assert.deepEqual((await broker.listPeers(claude)).map(peer => peer.address), [codex.address]);
+      const initial = await broker.send(self, claude.address, "Initial conversation.");
+      await broker.send(claude, codex.address, "Initial reply.", initial.messageId);
+
+      live.push(secondCodex);
+      const fromClaude = await broker.send(claude, secondCodex.name, "Hello, new Codex.");
+      assert.equal(fromClaude.state, "delivered");
+      assert.equal(fromClaude.to, secondCodex.address);
+      assert.deepEqual((await broker.listPeers(claude)).map(peer => peer.address), [
+        codex.address, secondCodex.address,
+      ]);
+      assert.deepEqual((await broker.listPeers(self)).map(peer => peer.address), [
+        claude.address, secondCodex.address,
+      ]);
+
+      const fromCodex = await broker.send(self, secondCodex.address, "Codex to Codex.");
+      assert.equal(fromCodex.state, "delivered");
+      await broker.send(secondCodex, self.address, "Codex reply.", fromCodex.messageId);
+      assert.equal(broker.status(self, fromCodex.messageId).state, "replied");
+      assert.deepEqual(delivered, [codex.address, secondCodex.address, secondCodex.address, codex.address]);
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("refreshes peer lists after sessions close and preserves project and self filtering", async (context) => {
+    context.mock.timers.enable({ apis: ["Date"], now: 1_800_000_000_000 });
+    const otherProject: Peer = {
+      ...codex,
+      sessionId: "other-project",
+      address: "codex:other-project",
+      projectId: "other-project",
+    };
+    const live = [codex, claude, otherProject];
+    const broker = new Broker({ store: store(), discover: async () => [...live] });
+    try {
+      assert.deepEqual((await broker.listPeers(self)).map(peer => peer.address), [claude.address]);
+      assert.deepEqual((await broker.listPeers(self, true)).map(peer => peer.address), [
+        claude.address, otherProject.address,
+      ]);
+      live.splice(1, 1);
+      assert.deepEqual(await broker.listPeers(self), []);
+      await assert.rejects(broker.send(self, self.address, "self message"), { code: "SELF_TARGET" });
+    } finally {
+      await broker.close();
+    }
+  });
+
   it("persists, delivers, and acknowledges messages", async () => {
     const deliverClaude = mock.fn(async (_peer: Peer, _payload: string) => undefined);
     const broker = new Broker({

@@ -61,10 +61,9 @@ export async function resolveSelfContext(
       environment.MUSE_SESSION_ID ??
       environment.MUSE_THREAD_ID ??
       explicitSessionId(provider, environment);
-    const peer =
-      (environmentId
-        ? peers.find((candidate) => candidate.sessionId === environmentId)
-        : undefined) ?? peers.find((candidate) => candidate.hostPid === hostPid);
+    const peer = environmentId
+      ? peers.find((candidate) => candidate.sessionId === environmentId)
+      : peers.find((candidate) => candidate.hostPid === hostPid);
     if (peer) return { ...peer, hostPid };
     if (environmentId) {
       const cwd = environment.ORCODE_CWD ?? process.cwd();
@@ -89,11 +88,9 @@ export async function resolveSelfContext(
   const peers = await discoverNativeClaudePeers();
   const environmentId =
     environment.CLAUDE_CODE_SESSION_ID ?? explicitSessionId(provider, environment);
-  const peer =
-    peers.find((candidate) => candidate.hostPid === hostPid) ??
-    (environmentId
-      ? peers.find((candidate) => candidate.sessionId === environmentId)
-      : undefined);
+  const peer = environmentId
+    ? peers.find((candidate) => candidate.sessionId === environmentId)
+    : peers.find((candidate) => candidate.hostPid === hostPid);
   if (peer) return { ...peer, hostPid };
   if (environmentId) {
     const cwd = environment.CLAUDE_PROJECT_DIR ?? environment.ORCODE_CWD ?? process.cwd();

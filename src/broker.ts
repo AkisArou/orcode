@@ -66,8 +66,6 @@ export class Broker {
   private readonly deliverClaude: (peer: Peer, payload: string) => Promise<void>;
   private readonly deliverMuse: (peer: Peer, payload: string, messageId: string) => Promise<void>;
   private readonly deliveryTails = new Map<string, Promise<void>>();
-  private livePeers: Peer[] = [];
-  private discoveryAt = 0;
   private discovering: Promise<Peer[]> | undefined;
   private claudePeers: Peer[] = [];
   private claudeDiscoveryAt = 0;
@@ -106,7 +104,6 @@ export class Broker {
     const live = await this.refreshPeers();
     return live
       .filter((peer) => peer.address !== self.address)
-      .filter((peer) => peer.provider !== self.provider)
       .filter((peer) => allProjects || peer.projectId === self.projectId)
       .sort((left, right) => left.address.localeCompare(right.address));
   }
@@ -117,7 +114,7 @@ export class Broker {
     message: string,
     replyTo?: string,
   ): Promise<SendResult> {
-    if (to === self.address || to === self.name) {
+    if (to === self.address) {
       throw new OrcodeError("SELF_TARGET", "A session cannot message itself.");
     }
     this.store.upsertPeer(asPeer(self));
@@ -168,16 +165,14 @@ export class Broker {
   }
 
   private async refreshPeers(): Promise<Peer[]> {
-    if (Date.now() - this.discoveryAt < 1_000) return this.livePeers;
     if (this.discovering) return await this.discovering;
     this.discovering = this.discover().then((live) => {
       this.store.upsertPeers(live);
-      this.livePeers = live;
-      this.discoveryAt = Date.now();
+      const discoveryAt = Date.now();
       this.claudePeers = live.filter((peer) => peer.provider === "claude");
-      this.claudeDiscoveryAt = this.discoveryAt;
+      this.claudeDiscoveryAt = discoveryAt;
       this.musePeers = live.filter((peer) => peer.provider === "muse");
-      this.museDiscoveryAt = this.discoveryAt;
+      this.museDiscoveryAt = discoveryAt;
       return live;
     });
     try {
@@ -221,7 +216,7 @@ export class Broker {
 
   private resolvePeer(self: SelfContext, live: Peer[], target: string): Peer {
     const relevant = live.filter(
-      (peer) => peer.provider !== self.provider && peer.projectId === self.projectId,
+      (peer) => peer.address !== self.address && peer.projectId === self.projectId,
     );
     const matches = target.includes(":")
       ? relevant.filter((peer) => peer.address === target)
@@ -234,9 +229,12 @@ export class Broker {
       );
     }
     if (matches.length === 1) return matches[0] as Peer;
+    if (target === self.name) {
+      throw new OrcodeError("SELF_TARGET", "A session cannot message itself.");
+    }
     if (target.includes(":")) {
       const known = this.store.peer(target);
-      if (known && known.provider !== self.provider) return known;
+      if (known) return known;
     }
     throw new OrcodeError(
       "PEER_NOT_FOUND",

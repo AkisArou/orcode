@@ -99,6 +99,15 @@ updates and checks that the registered host process is still alive.
 
 If Codex sessions are missing, run `orcode doctor`; it checks the shared daemon
 connection as well as CLI versions and MCP configuration.
+`orcode peers` also prints Codex discovery failures to stderr while preserving
+its normal peer output on stdout.
+
+Check Codex's startup warnings if the daemon is running but a session is still
+missing. Command-line configuration overrides (`-c`, `--enable`, `--disable`,
+or `--search`) can force Codex into embedded mode, which has no external
+messaging endpoint. A shell alias or launcher that injects such options causes
+the same problem. Store those settings in Codex's configuration file and then
+restart/resume the session so it can connect to the shared daemon.
 
 ## MCP tools
 

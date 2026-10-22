@@ -6,7 +6,7 @@ import { identifyProject } from "./project.ts";
 import { processIsAlive, runProcess } from "./process.ts";
 import { codexDaemonInfo, CodexAppServerClient } from "./transports/codex.ts";
 import { museDataRoot } from "./transports/muse.ts";
-import type { Peer } from "./types.ts";
+import type { Peer, Provider } from "./types.ts";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -350,9 +350,14 @@ export async function discoverNativeMusePeers(): Promise<Peer[]> {
   return peers.sort((left, right) => left.address.localeCompare(right.address));
 }
 
-export async function discoverAllNativePeers(): Promise<Peer[]> {
+export async function discoverAllNativePeers(options: {
+  onError?: (provider: Provider, error: unknown) => void;
+} = {}): Promise<Peer[]> {
   const [codex, claude, muse] = await Promise.all([
-    discoverNativeCodexPeers(),
+    discoverNativeCodexPeers({ strict: true }).catch((error: unknown) => {
+      options.onError?.("codex", error);
+      return [];
+    }),
     discoverNativeClaudePeers(),
     discoverNativeMusePeers(),
   ]);

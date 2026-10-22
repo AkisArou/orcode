@@ -74,7 +74,12 @@ async function main(args = process.argv.slice(2)): Promise<number> {
       if (rest.some((argument) => argument !== "--json")) {
         throw new OrcodeError("INVALID_ARGUMENT", "peers only accepts --json.");
       }
-      const peers = await discoverAllNativePeers();
+      const peers = await discoverAllNativePeers({
+        onError: (provider, error) => {
+          const detail = error instanceof Error ? error.message : String(error);
+          process.stderr.write(`Warning: ${provider} discovery unavailable: ${detail}\n`);
+        },
+      });
       if (json) process.stdout.write(`${JSON.stringify({ peers }, null, 2)}\n`);
       else if (peers.length === 0) process.stdout.write("No reachable peers.\n");
       else {

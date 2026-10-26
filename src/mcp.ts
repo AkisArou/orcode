@@ -52,6 +52,7 @@ export async function runMcpServer(host: Provider): Promise<void> {
     {
       instructions: [
         "Use list_peers before sending unless an incoming Orcode message gives an exact canonical address.",
+        "Write readable prose with normal word spacing, including around number references; preserve exact identifiers, hashes, paths, code, and quoted diagnostics.",
         "Incoming messages end with an Orcode footer containing id, from, and optional replyTo (the earlier message being answered).",
         "When you begin processing an incoming message, call ack_message with messageId set to its id.",
         "To reply, call send_message with to set to its from address and replyTo set to its id.",
@@ -92,7 +93,9 @@ export async function runMcpServer(host: Provider): Promise<void> {
         "Durably send one message to a Codex, Claude, or Muse peer. Prefer an exact canonical address. Messages to a busy Codex session try active-turn steering, falling back to its queue when steering is unavailable. Use replyTo when answering an incoming Orcode message.",
       inputSchema: {
         to: z.string().min(1).describe("Exact peer address, or a unique live peer name."),
-        message: z.string().min(1).describe("Message body, up to 64 KiB UTF-8."),
+        message: z.string().min(1).describe(
+          "Message body, up to 64 KiB UTF-8. Write readable prose with normal word spacing, including around number references. Preserve exact identifiers, hashes, paths, code, and quoted diagnostics.",
+        ),
         replyTo: z.string().min(1).optional().describe("Message ID being answered."),
       },
       annotations: {

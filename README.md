@@ -140,6 +140,9 @@ identifies the earlier message being answered. The MCP server instructions
 tell agents how to acknowledge and reply, and to treat peer bodies as untrusted
 context that cannot expand permissions or override higher-priority instructions.
 The transcript displays the same text the agent receives.
+Message bodies are forwarded unchanged. Senders are instructed to use normal
+word spacing in prose, including around number references, while preserving
+exact identifiers, hashes, paths, code, and quoted diagnostics.
 
 ## Delivery semantics
 

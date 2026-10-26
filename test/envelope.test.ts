@@ -26,14 +26,29 @@ const peer: Peer = {
 };
 
 describe("peer envelope", () => {
-  it("renders readable text with a stable reply address instead of JSON", () => {
-    const envelope = createEnvelope(self, peer, "Please review the patch.", undefined, "message-1");
-    const text = serializeEnvelope(envelope);
-    assert.match(text, /^Orcode from MainCodex — Please review the patch\./u);
-    assert.match(text, /## Message/u);
-    assert.match(text, /Please review the patch\./u);
-    assert.match(text, /codex:codex-session/u);
-    assert.ok(text.includes(`Sent \`${envelope.sentAt}\``));
-    assert.doesNotMatch(text, /"protocol":/u);
+  it("renders a local sender/date heading, the body once, and complete reply metadata", (context) => {
+    const previousTimezone = process.env.TZ;
+    process.env.TZ = "Europe/Athens";
+    context.after(() => {
+      if (previousTimezone === undefined) delete process.env.TZ;
+      else process.env.TZ = previousTimezone;
+    });
+    const body = "Please review the patch.\nKeep this line unchanged.";
+    const replyId = "ffc88e6b-1234-4000-8000-123456789abc";
+    for (const replyTo of [undefined, replyId]) {
+      const envelope = {
+        ...createEnvelope(self, peer, body, replyTo, "message-1"),
+        sentAt: "2026-10-26T06:52:41.006Z",
+      };
+      const text = serializeEnvelope(envelope);
+      assert.match(text, /^## MainCodex \(26 Oct 2026, 08:52 EET\)\n\n/u);
+      assert.ok(text.includes(`\n\n${body}\n\n`));
+      assert.equal(text.split("Please review the patch.").length, 2);
+      const footer = text.split("\n").at(-1) ?? "";
+      assert.ok(footer.includes("Orcode · id=`message-1` · from=`codex:codex-session`"));
+      if (replyTo) assert.ok(footer.includes(`replyTo=\`${replyId}\``));
+      else assert.doesNotMatch(footer, /replyTo=/u);
+      assert.doesNotMatch(text, /Orcode from|## Message|"protocol":/u);
+    }
   });
 });

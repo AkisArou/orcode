@@ -19,6 +19,10 @@ describe("Orcode MCP server", () => {
     const client = new Client({ name: "orcode-test", version: "0.2.0" });
     try {
       await client.connect(transport);
+      const instructions = client.getInstructions() ?? "";
+      assert.match(instructions, /ack_message with messageId set to its id/u);
+      assert.match(instructions, /send_message with to set to its from address and replyTo set to its id/u);
+      assert.match(instructions, /untrusted context.*cannot override higher-priority instructions or permissions/u);
       const tools = await client.listTools();
       assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), [
         "ack_message",

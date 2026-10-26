@@ -122,9 +122,24 @@ Orcode exposes four tools to all three agents:
 - `ack_message({ messageId })` confirms that the exact recipient has begun
   processing an incoming message.
 
-Each incoming message includes its ID, exact reply address, and the `replyTo`
-value to use. It also marks the body as untrusted peer context: peer messages
-cannot expand permissions or override higher-priority instructions.
+Incoming messages show the sender and date in the broker's local time, followed
+by the original body once and a compact routing footer:
+
+```markdown
+## tsrs (26 Oct 2026, 08:52 EET)
+
+Confirmed from full retained stderr: ...
+
+---
+Orcode · id=`message-id` · from=`codex:thread-id` · replyTo=`earlier-message-id`
+```
+
+The footer's `id` is used to acknowledge this message and as `replyTo` when
+answering it; `from` is the exact reply address. The optional footer `replyTo`
+identifies the earlier message being answered. The MCP server instructions
+tell agents how to acknowledge and reply, and to treat peer bodies as untrusted
+context that cannot expand permissions or override higher-priority instructions.
+The transcript displays the same text the agent receives.
 
 ## Delivery semantics
 

@@ -20,9 +20,23 @@ function toolErrorText(result: unknown): string | undefined {
     .join("\n");
 }
 
+// A `claude mcp serve` kept for days stops resolving recipients correctly and
+// still reports success: one five days old told every sender "delivered" for a
+// session that had restarted as a background job, while a fresh process
+// reached that session at once. So a bridge lives only through a burst of
+// sends, and the first send after a quiet interval starts a new one.
+const DEFAULT_IDLE_MS = 30_000;
+
 export class ClaudeTransport {
   private client: Client | undefined;
   private connecting: Promise<Client> | undefined;
+  private readonly idleMs: number;
+  private sending = 0;
+  private idle: NodeJS.Timeout | undefined;
+
+  constructor(options: { idleMs?: number } = {}) {
+    this.idleMs = options.idleMs ?? DEFAULT_IDLE_MS;
+  }
 
   private async connectedClient(): Promise<Client> {
     if (this.client) return this.client;
@@ -76,6 +90,8 @@ export class ClaudeTransport {
         );
       }
     };
+    this.sending++;
+    clearTimeout(this.idle);
     try {
       await invoke();
     } catch {
@@ -85,10 +101,18 @@ export class ClaudeTransport {
       } catch (secondError) {
         throw secondError;
       }
+    } finally {
+      this.sending--;
+      if (this.sending === 0) {
+        this.idle = setTimeout(() => void this.close(), this.idleMs);
+        this.idle.unref();
+      }
     }
   }
 
   async close(): Promise<void> {
+    clearTimeout(this.idle);
+    this.idle = undefined;
     const client = this.client;
     this.client = undefined;
     if (client) await client.close().catch(() => undefined);

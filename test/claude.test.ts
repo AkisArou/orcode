@@ -19,8 +19,10 @@ function fixture() {
   roots.push(root);
   const sessionsPath = join(root, "sessions.json");
   const deliveriesPath = join(root, "deliveries.jsonl");
+  const bridgesPath = join(root, "bridges.txt");
   const command = join(root, "claude.mjs");
   writeFileSync(deliveriesPath, "");
+  writeFileSync(bridgesPath, "");
   writeFileSync(command, `#!${process.execPath}
 import { readFileSync, appendFileSync } from 'node:fs';
 import { McpServer } from ${JSON.stringify(import.meta.resolve("@modelcontextprotocol/sdk/server/mcp.js"))};
@@ -30,6 +32,7 @@ const sessions = () => JSON.parse(readFileSync(${JSON.stringify(sessionsPath)}, 
 if (process.argv[2] === 'agents') {
   console.log(JSON.stringify(sessions()));
 } else {
+  appendFileSync(${JSON.stringify(bridgesPath)}, process.pid + '\\n');
   const server = new McpServer({name:'native-claude-fixture',version:'1.0.0'});
   let listed = [];
   server.registerTool('ListAgents', {inputSchema:{}}, async () => {
@@ -55,7 +58,7 @@ if (process.argv[2] === 'agents') {
   };
   const setSessions = (sessions: object[]) => writeFileSync(sessionsPath, JSON.stringify(sessions));
   setSessions([first]);
-  return { root, first, second, setSessions, deliveriesPath };
+  return { root, first, second, setSessions, deliveriesPath, bridgesPath };
 }
 
 afterEach(() => {
@@ -96,6 +99,25 @@ describe("Claude session lifecycle", () => {
       ]);
     } finally {
       await broker.close();
+      await transport.close();
+    }
+  });
+
+  it("keeps one bridge through a burst and starts a fresh one after a quiet interval", async () => {
+    const { deliveriesPath, bridgesPath } = fixture();
+    const transport = new ClaudeTransport({ idleMs: 50 });
+    try {
+      const [peer] = await discoverNativeClaudePeers();
+      assert.ok(peer);
+      await transport.send(peer, "First of a burst.");
+      await transport.send(peer, "Second of a burst.");
+      await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+      await transport.send(peer, "After a quiet interval.");
+      const bridges = readFileSync(bridgesPath, "utf8").trim().split("\n");
+      assert.equal(bridges.length, 2);
+      assert.notEqual(bridges[0], bridges[1]);
+      assert.equal(readFileSync(deliveriesPath, "utf8").trim().split("\n").length, 3);
+    } finally {
       await transport.close();
     }
   });

@@ -111,7 +111,7 @@ export class CodexAppServerClient {
     return this.closed || this.socket.readyState !== WebSocket.OPEN;
   }
 
-  async request(method: string, params: Record<string, unknown>): Promise<unknown> {
+  async request(method: string, params?: Record<string, unknown>): Promise<unknown> {
     const id = this.nextId++;
     return await new Promise((resolve, reject) => {
       const timer = setTimeout(() => {

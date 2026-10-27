@@ -5,6 +5,7 @@ import { discoverAllNativePeers } from "./discovery.ts";
 import { doctor } from "./doctor.ts";
 import { errorPayload, OrcodeError } from "./errors.ts";
 import { runMcpServer } from "./mcp.ts";
+import { restart } from "./restart.ts";
 import { setup, uninstall } from "./setup.ts";
 import type { Provider } from "./types.ts";
 
@@ -15,6 +16,7 @@ Setup:
   orcode setup [--force]     Configure all three CLIs once
   orcode uninstall           Remove Orcode MCP configuration
   orcode doctor              Verify versions, configuration, and broker
+  orcode restart             Restart the broker on the current code and reload hosts
 
 Diagnostics:
   orcode peers [--json]
@@ -103,6 +105,11 @@ async function main(args = process.argv.slice(2)): Promise<number> {
       const client = await ensureBroker();
       const status = await client.request<{ state: string }>("cancel", { messageId: rest[0] });
       process.stdout.write(`message ${rest[0]}: ${status.state}\n`);
+      return 0;
+    }
+    case "restart": {
+      if (rest.length > 0) throw new OrcodeError("INVALID_ARGUMENT", "restart takes no options.");
+      for (const line of await restart()) process.stdout.write(`${line}\n`);
       return 0;
     }
     case "doctor": {

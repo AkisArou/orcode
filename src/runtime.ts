@@ -33,6 +33,21 @@ export function runtimeRoot(
   return `/tmp/orcode-${uid()}`;
 }
 
+// Every root a broker of this user may be running at: this process's, and the
+// ones a process with another environment, or an older Orcode, chose.
+export function runtimeRoots(
+  environment: NodeJS.ProcessEnv = process.env,
+  userRuntimeDir = `/run/user/${uid()}`,
+): string[] {
+  const roots = [runtimeRoot(environment, userRuntimeDir)];
+  if (environment.XDG_RUNTIME_DIR && isAbsolute(environment.XDG_RUNTIME_DIR)) {
+    roots.push(join(environment.XDG_RUNTIME_DIR, "orcode"));
+  }
+  if (ownDirectory(userRuntimeDir)) roots.push(join(userRuntimeDir, "orcode"));
+  roots.push(`/tmp/orcode-${uid()}`);
+  return [...new Set(roots)];
+}
+
 export function ensureRuntimeRoot(root = runtimeRoot()): string {
   mkdirSync(root, { recursive: true, mode: 0o700 });
   chmodSync(root, 0o700);

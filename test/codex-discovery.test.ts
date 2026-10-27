@@ -16,7 +16,7 @@ describe("Codex live session discovery", () => {
         if (method === "thread/list") return { data: [thread("first")] };
         assert.equal(method, "thread/read");
         assert.equal(params.includeTurns, false);
-        return { thread: live.get(String(params.threadId)) };
+        return { thread: live.get(String(params?.threadId)) };
       },
     };
     assert.deepEqual((await discoverCodexPeers(client)).map(peer => peer.sessionId), ["first"]);
@@ -35,13 +35,13 @@ describe("Codex live session discovery", () => {
     const peers = await discoverCodexPeers({
       async request(method, params) {
         if (method === "thread/loaded/list") {
-          cursors.push(params.cursor);
-          return params.cursor === "page-2"
+          cursors.push(params?.cursor);
+          return params?.cursor === "page-2"
             ? { data: [ids[99], ids[100]], nextCursor: null }
             : { data: ids.slice(0, 100), nextCursor: "page-2" };
         }
         assert.equal(method, "thread/read");
-        return { thread: thread(String(params.threadId)) };
+        return { thread: thread(String(params?.threadId)) };
       },
     });
     assert.deepEqual(cursors, [undefined, "page-2"]);
@@ -58,8 +58,8 @@ describe("Codex live session discovery", () => {
     const peers = await discoverCodexPeers({
       async request(method, params) {
         if (method === "thread/loaded/list") return { data: [...threads.keys(), "closed"] };
-        if (params.threadId === "closed") throw new Error("thread no longer exists");
-        return { thread: threads.get(String(params.threadId)) };
+        if (params?.threadId === "closed") throw new Error("thread no longer exists");
+        return { thread: threads.get(String(params?.threadId)) };
       },
     });
     assert.deepEqual(peers.map(peer => peer.sessionId), ["healthy"]);

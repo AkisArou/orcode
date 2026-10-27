@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, rmSync, statSync } from "node:fs";
 import { createConnection, createServer, type Socket } from "node:net";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   discoverAllNativePeers,
   discoverNativeClaudePeers,
@@ -10,6 +11,7 @@ import {
 } from "./discovery.ts";
 import { createEnvelope, serializeEnvelope } from "./envelope.ts";
 import { errorPayload, OrcodeError } from "./errors.ts";
+import { processIsAlive } from "./process.ts";
 import { ensureRuntimeRoot, runtimeRoot } from "./runtime.ts";
 import { MessageStore } from "./storage.ts";
 import { ClaudeTransport } from "./transports/claude.ts";
@@ -422,18 +424,36 @@ export async function runBrokerDaemon(): Promise<number> {
     rmSync(socketPath, { force: true });
   }
   const broker = new Broker();
-  const server = createServer((socket) => attachSocket(socket, broker));
+  const sockets = new Set<Socket>();
+  const server = createServer((socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+    attachSocket(socket, broker);
+  });
   await new Promise<void>((resolveListen, rejectListen) => {
     server.once("error", rejectListen);
     server.listen(socketPath, resolveListen);
   });
+  const listening = statSync(socketPath).ino;
+  // `server.close` waits for every open connection and `broker.close` for
+  // every transport, and either can hold a stopped broker alive: two did, no
+  // longer listening but still delivering through their old Claude bridges.
+  // So drop the connections and exit within a bounded time. Remove the socket
+  // only while it is still this broker's: one that exited late deleted the
+  // socket of the broker started in its place.
   const shutdown = () => {
-    server.close(() => {
-      void broker.close().finally(() => {
-        rmSync(socketPath, { force: true });
-        process.exit(0);
-      });
-    });
+    const exit = () => {
+      try {
+        if (statSync(socketPath).ino === listening) rmSync(socketPath, { force: true });
+      } catch {
+        // Already gone.
+      }
+      process.exit(0);
+    };
+    setTimeout(exit, 3_000).unref();
+    server.close();
+    for (const socket of sockets) socket.destroy();
+    void broker.close().finally(exit);
   };
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
@@ -492,21 +512,23 @@ export class BrokerClient {
   }
 }
 
-export async function ensureBroker(): Promise<BrokerClient> {
-  const client = new BrokerClient();
+// The daemon is this package's CLI, whatever program the caller is.
+const DAEMON_ENTRY = fileURLToPath(new URL("./cli.ts", import.meta.url));
+
+export async function ensureBroker(root = runtimeRoot()): Promise<BrokerClient> {
+  const client = new BrokerClient(brokerSocketPath(root));
   try {
     const hello = await client.request<{ protocolVersion: number }>("hello");
     if (hello.protocolVersion === BROKER_PROTOCOL_VERSION) return client;
-    await stopBroker();
+    await stopBroker(client.socketPath);
   } catch {
     // Start a broker below.
   }
   {
-    const entry = resolve(process.argv[1] ?? "src/cli.ts");
-    const child = spawn(process.execPath, [entry, "daemon", "run"], {
+    const child = spawn(process.execPath, [DAEMON_ENTRY, "daemon", "run"], {
       detached: true,
       stdio: "ignore",
-      env: process.env,
+      env: { ...process.env, ORCODE_RUNTIME_DIR: root },
     });
     child.unref();
     const deadline = Date.now() + 5_000;
@@ -530,15 +552,20 @@ export async function ensureBroker(): Promise<BrokerClient> {
   }
 }
 
-export async function stopBroker(): Promise<boolean> {
-  const socketPath = brokerSocketPath();
+// Stopped means the daemon has exited, not only that its socket stopped
+// listening: one that lingers keeps delivering through stale transports.
+export async function stopBroker(socketPath = brokerSocketPath()): Promise<boolean> {
   if (!existsSync(socketPath) || !(await socketIsLive(socketPath))) return false;
   const client = new BrokerClient(socketPath);
+  const { pid } = await client.request<{ pid: number }>("hello");
   await client.request("shutdown");
   const deadline = Date.now() + 5_000;
-  while (Date.now() < deadline) {
-    if (!(await socketIsLive(socketPath))) return true;
+  while (processIsAlive(pid)) {
+    if (Date.now() > deadline) {
+      process.kill(pid, "SIGKILL");
+      break;
+    }
     await new Promise((resolveWait) => setTimeout(resolveWait, 25));
   }
-  throw new OrcodeError("PROVIDER_UNAVAILABLE", "The Orcode broker did not stop in time.");
+  return true;
 }

@@ -124,7 +124,12 @@ export async function discoverCodexPeers(
         return {
           provider: "codex",
           sessionId,
-          name: stringField(thread, ["name"]) ?? `Codex ${sessionId.slice(0, 8)}`,
+          // A thread that has never had a message (`preview` empty) stays
+          // reachable, so a newly opened session can receive its first brief,
+          // but says so: Codex opens one at launch even when the session then
+          // resumes another thread.
+          name: (stringField(thread, ["name"]) ?? `Codex ${sessionId.slice(0, 8)}`) +
+            (thread.preview === "" ? " (empty)" : ""),
           address: `codex:${sessionId}`,
           cwd,
           projectId: project.id,

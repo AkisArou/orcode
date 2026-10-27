@@ -65,6 +65,23 @@ describe("Codex live session discovery", () => {
     assert.deepEqual(peers.map(peer => peer.sessionId), ["healthy"]);
   });
 
+  it("labels a thread that has never had a message, and keeps it reachable", async () => {
+    const live = new Map([
+      ["blank", thread("blank", { name: null, preview: "" })],
+      ["used", thread("used", { name: null, preview: "hello" })],
+    ]);
+    const client = {
+      async request(method: string, params: Record<string, unknown>): Promise<unknown> {
+        if (method === "thread/loaded/list") return { data: [...live.keys()], nextCursor: null };
+        return { thread: live.get(String(params?.threadId)) };
+      },
+    };
+    assert.deepEqual((await discoverCodexPeers(client)).map(peer => [peer.address, peer.name]), [
+      ["codex:blank", "Codex blank (empty)"],
+      ["codex:used", "Codex used"],
+    ]);
+  });
+
   it("rejects a repeated pagination cursor instead of hanging", async () => {
     await assert.rejects(discoverCodexPeers({
       async request() { return { data: [], nextCursor: "same-page" }; },

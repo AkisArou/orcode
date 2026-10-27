@@ -181,6 +181,15 @@ describe("Claude session lifecycle", () => {
     assert.equal(pending.address, "claude:pending-session");
   });
 
+  it("keeps a resumed session's registered address when Claude Code gives it a new session ID", async () => {
+    const { first, setSessions } = fixture();
+    setSessions([first]);
+    const self = await resolveSelfContext("claude", {}, {
+      CLAUDE_CODE_SESSION_ID: "resumed-under-a-new-id",
+    }, process.pid);
+    assert.equal(self.address, `claude:${first.sessionId}`);
+  });
+
   it("excludes a stale process record without hiding healthy Claude sessions", async () => {
     const { first, second, setSessions } = fixture();
     setSessions([first, { ...second, pid: 2_147_483_647 }]);

@@ -16,6 +16,25 @@ function requestThreadId(extra: HandlerExtra): string | undefined {
     : undefined;
 }
 
+/** The registered Claude peer for this MCP process. The session ID the host
+ * exposes wins. When it matches no registered peer, a sole registration hosted by this
+ * process is the same conversation under its registered ID: Claude Code resumes
+ * a session with a new `--session-id` while the agent listing keeps the
+ * original, and one Claude process is one conversation. Two registrations in
+ * one process leave the ID unresolved, as does none, which is a registration
+ * still pending. Muse hosts several sessions in one process, so it keeps its
+ * exact lookup. */
+function registeredSelf<T extends { sessionId: string; hostPid?: number }>(
+  peers: T[],
+  environmentId: string | undefined,
+  hostPid: number,
+): T | undefined {
+  const hosted = peers.filter((candidate) => candidate.hostPid === hostPid);
+  if (!environmentId) return hosted[0];
+  return peers.find((candidate) => candidate.sessionId === environmentId) ??
+    (hosted.length === 1 ? hosted[0] : undefined);
+}
+
 function explicitSessionId(provider: Provider, environment: NodeJS.ProcessEnv): string | undefined {
   const value = environment.ORCODE_SESSION_ID;
   if (!value) return undefined;
@@ -88,9 +107,7 @@ export async function resolveSelfContext(
   const peers = await discoverNativeClaudePeers();
   const environmentId =
     environment.CLAUDE_CODE_SESSION_ID ?? explicitSessionId(provider, environment);
-  const peer = environmentId
-    ? peers.find((candidate) => candidate.sessionId === environmentId)
-    : peers.find((candidate) => candidate.hostPid === hostPid);
+  const peer = registeredSelf(peers, environmentId, hostPid);
   if (peer) return { ...peer, hostPid };
   if (environmentId) {
     const cwd = environment.CLAUDE_PROJECT_DIR ?? environment.ORCODE_CWD ?? process.cwd();

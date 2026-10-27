@@ -20,23 +20,65 @@ function toolErrorText(result: unknown): string | undefined {
     .join("\n");
 }
 
-// A `claude mcp serve` kept for days stops resolving recipients correctly and
-// still reports success: one five days old told every sender "delivered" for a
-// session that had restarted as a background job, while a fresh process
-// reached that session at once. So a bridge lives only through a burst of
-// sends, and the first send after a quiet interval starts a new one.
-const DEFAULT_IDLE_MS = 30_000;
+type Recipient = { name: string; ref: string };
+
+// ListAgents answers with JSON: sections of rows, each a recipient's name and
+// the ref SendMessage takes beside it.
+function recipients(listing: unknown): Recipient[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(toolErrorText(listing) ?? "");
+  } catch {
+    throw new OrcodeError("PROTOCOL_ERROR", "Claude Code returned an unreadable recipient listing.");
+  }
+  const sections = (parsed as { sections?: unknown } | null)?.sections;
+  if (!Array.isArray(sections)) {
+    throw new OrcodeError("PROTOCOL_ERROR", "Claude Code's recipient listing has no sections.");
+  }
+  const rows: Recipient[] = [];
+  for (const section of sections) {
+    const sectionRows = (section as { rows?: unknown } | null)?.rows;
+    if (!Array.isArray(sectionRows)) continue;
+    for (const row of sectionRows) {
+      const { name, ref } = (row ?? {}) as { name?: unknown; ref?: unknown };
+      if (typeof name === "string" && typeof ref === "string") rows.push({ name, ref });
+    }
+  }
+  return rows;
+}
+
+// `claude agents` and ListAgents name a session alike but need not give it the
+// same ref: a session running in the background was `MainClaude [8d094110]`
+// to the one and `MainClaude [a06aa1]` to the other, and SendMessage takes only
+// the second. So the address is the listing's own row for the session's name.
+function recipientAddress(peer: Peer, rows: Recipient[]): string {
+  const named = rows.filter((row) => row.name === peer.name);
+  const addresses = named.map((row) => `${row.name} [${row.ref}]`);
+  if (addresses.includes(peer.nativeTarget)) return peer.nativeTarget;
+  const [only, ...others] = addresses;
+  if (only !== undefined && others.length === 0) return only;
+  if (only === undefined) {
+    throw new OrcodeError("PEER_OFFLINE", `${peer.address} is not in Claude Code's recipient listing.`);
+  }
+  throw new OrcodeError(
+    "PEER_AMBIGUOUS",
+    `${addresses.length} Claude sessions are named ${peer.name}; rename one so messages reach the right one.`,
+  );
+}
+
+// SendMessage reports an unreachable recipient as an ordinary result carrying
+// `"success": false`, not as a tool error. Only an explicit success counts.
+function reportsSuccess(reply: string): boolean {
+  try {
+    return (JSON.parse(reply) as { success?: unknown } | null)?.success === true;
+  } catch {
+    return false;
+  }
+}
 
 export class ClaudeTransport {
   private client: Client | undefined;
   private connecting: Promise<Client> | undefined;
-  private readonly idleMs: number;
-  private sending = 0;
-  private idle: NodeJS.Timeout | undefined;
-
-  constructor(options: { idleMs?: number } = {}) {
-    this.idleMs = options.idleMs ?? DEFAULT_IDLE_MS;
-  }
 
   private async connectedClient(): Promise<Client> {
     if (this.client) return this.client;
@@ -66,8 +108,8 @@ export class ClaudeTransport {
   async send(peer: Peer, payload: string): Promise<void> {
     const invoke = async () => {
       const client = await this.connectedClient();
-      // Claude resolves session references against its native recipient listing.
-      // Refresh it on this connection so later sessions and renames are visible.
+      // Claude resolves recipients against its native listing. Read it on this
+      // connection so later sessions and renames are visible.
       const listing = await client.callTool({ name: "ListAgents", arguments: {} });
       if (listing.isError) {
         throw new OrcodeError(
@@ -78,20 +120,19 @@ export class ClaudeTransport {
       const result = await client.callTool({
         name: "SendMessage",
         arguments: {
-          to: peer.nativeTarget,
+          to: recipientAddress(peer, recipients(listing)),
           message: payload,
           summary: `Orcode message to ${peer.name}`,
         },
       });
-      if (result.isError) {
+      const reply = toolErrorText(result) ?? "";
+      if (result.isError || !reportsSuccess(reply)) {
         throw new OrcodeError(
           "PEER_OFFLINE",
-          `Claude Code rejected the message for ${peer.address}: ${toolErrorText(result) ?? "unknown error"}`,
+          `Claude Code did not deliver the message for ${peer.address}: ${reply || "unknown error"}`,
         );
       }
     };
-    this.sending++;
-    clearTimeout(this.idle);
     try {
       await invoke();
     } catch {
@@ -101,18 +142,10 @@ export class ClaudeTransport {
       } catch (secondError) {
         throw secondError;
       }
-    } finally {
-      this.sending--;
-      if (this.sending === 0) {
-        this.idle = setTimeout(() => void this.close(), this.idleMs);
-        this.idle.unref();
-      }
     }
   }
 
   async close(): Promise<void> {
-    clearTimeout(this.idle);
-    this.idle = undefined;
     const client = this.client;
     this.client = undefined;
     if (client) await client.close().catch(() => undefined);

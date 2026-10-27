@@ -19,10 +19,8 @@ function fixture() {
   roots.push(root);
   const sessionsPath = join(root, "sessions.json");
   const deliveriesPath = join(root, "deliveries.jsonl");
-  const bridgesPath = join(root, "bridges.txt");
   const command = join(root, "claude.mjs");
   writeFileSync(deliveriesPath, "");
-  writeFileSync(bridgesPath, "");
   writeFileSync(command, `#!${process.execPath}
 import { readFileSync, appendFileSync } from 'node:fs';
 import { McpServer } from ${JSON.stringify(import.meta.resolve("@modelcontextprotocol/sdk/server/mcp.js"))};
@@ -32,17 +30,23 @@ const sessions = () => JSON.parse(readFileSync(${JSON.stringify(sessionsPath)}, 
 if (process.argv[2] === 'agents') {
   console.log(JSON.stringify(sessions()));
 } else {
-  appendFileSync(${JSON.stringify(bridgesPath)}, process.pid + '\\n');
+  // Answers as Claude Code does: ListAgents as JSON rows whose ref may differ
+  // from the id \`claude agents\` reports, and an undeliverable SendMessage as
+  // an ordinary result with success false.
   const server = new McpServer({name:'native-claude-fixture',version:'1.0.0'});
   let listed = [];
   server.registerTool('ListAgents', {inputSchema:{}}, async () => {
-    listed = sessions().map(session => session.name + ' [' + session.id + ']');
-    return {content:[{type:'text',text:listed.join('\\n')}]};
+    listed = sessions().filter(session => !session.unlisted);
+    const rows = listed.map(session => ({name: session.name, ref: session.ref ?? session.id, type: 'bg', status: 'idle'}));
+    return {content:[{type:'text',text:JSON.stringify({listing:'', sections:[{kind:'sessions', total:rows.length, rows}], notes:[]})}]};
   });
   server.registerTool('SendMessage', {inputSchema:{to:z.string(),message:z.string(),summary:z.string()}}, async args => {
-    if (!listed.includes(args.to)) return {isError:true,content:[{type:'text',text:'unknown native recipient reference'}]};
+    const session = listed.find(session => session.name + ' [' + (session.ref ?? session.id) + ']' === args.to);
+    if (!session || session.refuses) {
+      return {content:[{type:'text',text:JSON.stringify({success:false, message:"No agent named '" + args.to + "' is reachable."})}]};
+    }
     appendFileSync(${JSON.stringify(deliveriesPath)}, JSON.stringify(args) + '\\n');
-    return {content:[{type:'text',text:'delivered'}]};
+    return {content:[{type:'text',text:JSON.stringify({success:true, message:'delivered'})}]};
   });
   await server.connect(new StdioServerTransport());
 }
@@ -58,7 +62,22 @@ if (process.argv[2] === 'agents') {
   };
   const setSessions = (sessions: object[]) => writeFileSync(sessionsPath, JSON.stringify(sessions));
   setSessions([first]);
-  return { root, first, second, setSessions, deliveriesPath, bridgesPath };
+  return { root, first, second, setSessions, deliveriesPath };
+}
+
+function brokerFor(root: string, transport: ClaudeTransport) {
+  const broker = new Broker({
+    store: new MessageStore(join(root, "broker")),
+    discover: discoverNativeClaudePeers,
+    discoverClaude: discoverNativeClaudePeers,
+    deliverClaude: (peer, payload) => transport.send(peer, payload),
+  });
+  const project = identifyProject(process.cwd());
+  const self: SelfContext = {
+    provider: "codex", sessionId: "sender", name: "sender", address: "codex:sender",
+    cwd: process.cwd(), projectId: project.id, projectRoot: project.root,
+  };
+  return { broker, self };
 }
 
 afterEach(() => {
@@ -103,21 +122,48 @@ describe("Claude session lifecycle", () => {
     }
   });
 
-  it("keeps one bridge through a burst and starts a fresh one after a quiet interval", async () => {
-    const { deliveriesPath, bridgesPath } = fixture();
-    const transport = new ClaudeTransport({ idleMs: 50 });
+  it("addresses a session by its recipient-listing ref when that differs from its agents id", async () => {
+    const { root, first, setSessions, deliveriesPath } = fixture();
+    // A background session: `claude agents` gives the session-id prefix, and
+    // ListAgents a ref of its own, which is what SendMessage takes.
+    setSessions([{ ...first, id: "8d094110", ref: "a06aa1" }]);
+    const transport = new ClaudeTransport();
+    const { broker, self } = brokerFor(root, transport);
     try {
-      const [peer] = await discoverNativeClaudePeers();
-      assert.ok(peer);
-      await transport.send(peer, "First of a burst.");
-      await transport.send(peer, "Second of a burst.");
-      await new Promise((resolveWait) => setTimeout(resolveWait, 250));
-      await transport.send(peer, "After a quiet interval.");
-      const bridges = readFileSync(bridgesPath, "utf8").trim().split("\n");
-      assert.equal(bridges.length, 2);
-      assert.notEqual(bridges[0], bridges[1]);
-      assert.equal(readFileSync(deliveriesPath, "utf8").trim().split("\n").length, 3);
+      assert.equal((await broker.send(self, first.name, "To the background session.")).state, "delivered");
+      const [delivery] = readFileSync(deliveriesPath, "utf8").trim().split("\n").map(line => JSON.parse(line));
+      assert.equal(delivery.to, `${first.name} [a06aa1]`);
     } finally {
+      await broker.close();
+      await transport.close();
+    }
+  });
+
+  it("keeps a message queued when Claude Code does not deliver it", async () => {
+    const { root, first, second, setSessions } = fixture();
+    const transport = new ClaudeTransport();
+    const { broker, self } = brokerFor(root, transport);
+    try {
+      setSessions([{ ...first, refuses: true }]);
+      const refused = await broker.send(self, first.name, "Answered with success false.");
+      assert.equal(refused.state, "queued");
+      assert.match(refused.lastError ?? "", /did not deliver/u);
+      setSessions([{ ...second, unlisted: true }]);
+      const unlisted = await broker.send(self, second.name, "Not in the recipient listing.");
+      assert.equal(unlisted.state, "queued");
+      assert.match(unlisted.lastError ?? "", /recipient listing/u);
+      // Recipients of their own: the broker holds later messages behind an
+      // earlier queued one for the same recipient.
+      const shared = { ...first, sessionId: "00000000-0000-4000-8000-000000000003", id: "third-ref", name: "Shared" };
+      setSessions([
+        { ...shared, ref: "one" },
+        { ...shared, sessionId: "00000000-0000-4000-8000-000000000004", id: "fourth-ref", ref: "two" },
+      ]);
+      const ambiguous = await broker.send(self, `claude:${shared.sessionId}`, "Two sessions share a name.");
+      assert.equal(ambiguous.state, "queued");
+      assert.match(ambiguous.lastError ?? "", /2 Claude sessions are named/u);
+    } finally {
+      await broker.close();
       await transport.close();
     }
   });
